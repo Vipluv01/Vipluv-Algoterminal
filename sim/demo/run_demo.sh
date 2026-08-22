@@ -1,20 +1,13 @@
 #!/usr/bin/env bash
-# Launches the live demo: the WebSocket simulation server plus a static
-# file server for the frontend, then prints the URL to open.
+# Launches the live demo: one process serves both the WebSocket simulation
+# feed and the static frontend on the same port (see demo_server.py's
+# serve_static_or_upgrade), so this matches exactly how the deployed
+# version runs -- no separate local-only static file server to fall out of
+# sync with production.
 set -e
 cd "$(dirname "$0")"
 
-echo "Starting simulation server (ws://localhost:8765)..."
-(cd .. && .venv/bin/python -u bourse_sim/demo_server.py) &
-SIM_PID=$!
-
-echo "Starting static file server (http://localhost:8080)..."
-python3 -m http.server 8080 &
-HTTP_PID=$!
-
-trap "kill $SIM_PID $HTTP_PID 2>/dev/null" EXIT INT TERM
-
-echo
-echo "Open http://localhost:8080/index.html in a browser."
-echo "Press Ctrl+C to stop both servers."
-wait
+PORT="${PORT:-8765}"
+echo "Starting demo server on http://localhost:$PORT ..."
+echo "Open that URL in a browser. Press Ctrl+C to stop."
+(cd .. && PORT="$PORT" .venv/bin/python -u bourse_sim/demo_server.py)

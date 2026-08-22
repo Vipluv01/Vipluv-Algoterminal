@@ -9,7 +9,32 @@ engine, in a browser -- no build step, no framework.
 ./run_demo.sh
 ```
 
-Then open **http://localhost:8080/index.html**.
+Then open **http://localhost:8765**.
+
+## Deploy it
+
+One `Dockerfile` builds the Go engine and the Python server into a single
+image that serves the WebSocket feed and the static frontend on one port
+(`$PORT`, defaulting to 8765) -- required for hosts that only route a
+single public port to a service, which is most free tiers.
+
+```bash
+# from the repo root (bourse/) -- the build needs the full Go source tree
+docker build -f sim/demo/Dockerfile -t bourse-demo .
+docker run -p 8765:8765 bourse-demo
+```
+
+To put it on a public URL (e.g. [Render](https://render.com), free tier):
+create a **Web Service**, point it at this repo, set:
+- **Root Directory**: repo root (leave blank)
+- **Dockerfile Path**: `sim/demo/Dockerfile`
+- **Docker Build Context Directory**: `.`
+
+Render sets `$PORT` automatically; `demo_server.py` reads it. No other
+config needed -- there's no database, no secrets, nothing else to wire up.
+Free-tier services on most platforms sleep after inactivity, so the first
+visitor after a quiet period will see a cold-start delay (tens of seconds)
+before the page loads.
 
 ## What it shows
 

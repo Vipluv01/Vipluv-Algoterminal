@@ -106,7 +106,11 @@
 </div>
 
 <script>
-const WS_URL = "ws://localhost:8765";
+// Same host/port the page itself was served from -- demo_server.py serves
+// both the WebSocket and this static file on one port, which is what lets
+// this work unmodified whether it's opened via run_demo.sh locally or from
+// a deployed public URL (where "localhost:8765" would never be reachable).
+const WS_URL = (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
 let ws;
 let priceHistory = [];
 const MAX_HISTORY = 400;

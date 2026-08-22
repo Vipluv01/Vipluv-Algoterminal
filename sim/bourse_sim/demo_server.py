@@ -15,16 +15,29 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import websockets
+from websockets.http11 import Response
+from websockets.datastructures import Headers
 
 from agents import InformedTrader, MarketMaker, NoiseTrader
 from avellaneda_stoikov import AvellanedaStoikovMaker, AvellanedaStoikovParams
 from engine import Engine
 from fundamental import FundamentalProcess
 from simulate import owner_of_order_id, to_ticks_static
+
+# Cap on live-spawned informed traders: this server is public once deployed,
+# and add_informed_trader() is reachable by ANY connected browser tab, not
+# just a trusted operator -- an uncapped loop of that command would grow
+# per-step work without bound and degrade the simulation for everyone else
+# watching. 50 is far more than the demo's own UI would ever spawn by hand.
+MAX_INFORMED_TRADERS = 50
+
+INDEX_HTML_PATH = Path(__file__).resolve().parents[1] / "demo" / "index.html"
 
 
 @dataclass
@@ -71,6 +84,8 @@ class LiveSim:
         self.eng.close()
 
     def add_informed_trader(self) -> None:
+        if len(self.informed_traders) >= MAX_INFORMED_TRADERS:
+            return
         self._next_informed_id += 1
         self.informed_traders.append(
             InformedTrader(trader_id=self._next_informed_id, tick_size=self.tick_size,
@@ -192,9 +207,42 @@ async def handle_client(ws) -> None:
         CLIENTS.discard(ws)
 
 
+_INDEX_HTML_BYTES = INDEX_HTML_PATH.read_bytes()
+
+
+async def serve_static_or_upgrade(connection, request):
+    """process_request hook: serves the demo's one static file for a plain
+    GET, and returns None (the websockets default) for everything else --
+    including the actual WebSocket upgrade request, which MUST fall through
+    to the library's own handshake handling to work at all.
+
+    This is what lets one process, one port, serve both the frontend and
+    the live simulation feed -- required for deploying anywhere that only
+    routes a single public port to a service (which is most free hosting
+    tiers), and simpler than reasoning about two ports staying in sync
+    between local dev and production.
+    """
+    # A real WebSocket handshake also arrives as a GET to "/" -- the ONLY
+    # thing distinguishing it from a plain page load is the Upgrade header.
+    # Matching on path alone (an earlier version of this) served the raw
+    # HTML back as the response to the handshake itself, which the browser
+    # correctly rejects as a failed upgrade -- silently breaking the entire
+    # live feed while the page still loaded fine, which is exactly the kind
+    # of bug that looks like "it's working" until you check the console.
+    if request.headers.get("Upgrade", "").lower() == "websocket":
+        return None
+    if request.path in ("/", "/index.html"):
+        return Response(200, "OK", Headers([("Content-Type", "text/html; charset=utf-8")]), _INDEX_HTML_BYTES)
+    if request.path == "/healthz":
+        return Response(200, "OK", Headers([("Content-Type", "text/plain")]), b"ok")
+    return None
+
+
 async def main() -> None:
-    async with websockets.serve(handle_client, "localhost", 8765):
-        print("WebSocket server on ws://localhost:8765", flush=True)
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", 8765))
+    async with websockets.serve(handle_client, host, port, process_request=serve_static_or_upgrade):
+        print(f"Serving demo (WebSocket + static frontend) on http://{host}:{port}", flush=True)
         await sim_loop()
 
 
