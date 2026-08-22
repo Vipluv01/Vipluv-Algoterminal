@@ -1,0 +1,16 @@
+# Compiled binary -- rebuilt on demand by find_simserver_binary() / go build.
+bin/
+
+# Python virtualenv -- created and managed by uv, not shared/portable.
+sim/.venv/
+
+# Python bytecode / test caches.
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Go test/build artifacts.
+*.test
+*.out
+
+.DS_Store

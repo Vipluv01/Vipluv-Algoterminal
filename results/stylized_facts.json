@@ -1,0 +1,117 @@
+{
+  "generated_at": "2026-08-22T21:51:26Z",
+  "config": {
+    "steps": 8000,
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "maker": "single default MarketMaker"
+  },
+  "per_seed": [
+    {
+      "seed": 0,
+      "n_returns": 7999,
+      "fat_tails": {
+        "pass": true,
+        "excess_kurtosis": 3.2733338169512862,
+        "pvalue": 8.72297714099186e-135
+      },
+      "weak_return_autocorrelation": {
+        "pass": true,
+        "lag1": 0.024260224636684057,
+        "pvalue": 0.03003644996980897
+      },
+      "volatility_clustering": {
+        "pass": false,
+        "abs_return_lag1_autocorr": -0.3385136307223967,
+        "pvalue": 1.2618231675127986e-213
+      }
+    },
+    {
+      "seed": 1,
+      "n_returns": 7999,
+      "fat_tails": {
+        "pass": true,
+        "excess_kurtosis": 4.912743615035724,
+        "pvalue": 2.27774908795855e-193
+      },
+      "weak_return_autocorrelation": {
+        "pass": true,
+        "lag1": 0.03447993510509749,
+        "pvalue": 0.0020421795297253698
+      },
+      "volatility_clustering": {
+        "pass": false,
+        "abs_return_lag1_autocorr": -0.3087109234582929,
+        "pvalue": 3.6400249771830534e-176
+      }
+    },
+    {
+      "seed": 2,
+      "n_returns": 7999,
+      "fat_tails": {
+        "pass": true,
+        "excess_kurtosis": 4.427102688057508,
+        "pvalue": 2.0581982560465845e-177
+      },
+      "weak_return_autocorrelation": {
+        "pass": true,
+        "lag1": 0.026883917282293446,
+        "pvalue": 0.016202192831443862
+      },
+      "volatility_clustering": {
+        "pass": false,
+        "abs_return_lag1_autocorr": -0.31256824352757084,
+        "pvalue": 8.918180969651438e-181
+      }
+    },
+    {
+      "seed": 3,
+      "n_returns": 7999,
+      "fat_tails": {
+        "pass": true,
+        "excess_kurtosis": 4.496735503070365,
+        "pvalue": 3.8847114574251875e-179
+      },
+      "weak_return_autocorrelation": {
+        "pass": true,
+        "lag1": 0.026958910750231165,
+        "pvalue": 0.015907182725626974
+      },
+      "volatility_clustering": {
+        "pass": false,
+        "abs_return_lag1_autocorr": -0.3417136278457817,
+        "pvalue": 6.653499130692174e-218
+      }
+    },
+    {
+      "seed": 4,
+      "n_returns": 7999,
+      "fat_tails": {
+        "pass": true,
+        "excess_kurtosis": 2.40782882690217,
+        "pvalue": 1.171314697533301e-99
+      },
+      "weak_return_autocorrelation": {
+        "pass": true,
+        "lag1": 0.03680418170148132,
+        "pvalue": 0.000994580227088211
+      },
+      "volatility_clustering": {
+        "pass": false,
+        "abs_return_lag1_autocorr": -0.39363331038206956,
+        "pvalue": 1.0883036584431948e-294
+      }
+    }
+  ],
+  "summary": {
+    "fat_tails_pass_rate": 1.0,
+    "weak_return_autocorrelation_pass_rate": 1.0,
+    "volatility_clustering_pass_rate": 0.0
+  },
+  "note": "Volatility clustering fails by design here, not by bug -- it is a real, investigated, open finding (wrong-signed |return| autocorrelation), not unexamined noise. See sim/KNOWN_ISSUES.md for the ruled-out hypotheses and the current best-supported explanation before assuming this is a defect."
+}

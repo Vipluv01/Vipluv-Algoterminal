@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      - name: test (full suite, includes 100k-op property tests + fuzz smoke)
+        run: go test ./... -v -timeout 5m
+
+      - name: fuzz smoke (30s — catches regressions the seed corpus doesn't)
+        run: go test ./internal/book/ -fuzz FuzzBook -fuzztime 30s
+
+      - name: benchmark + latency report
+        run: go test ./bench/... -run TestLatencyReport -bench . -benchmem -timeout 5m
+
+      - name: upload latency report
+        uses: actions/upload-artifact@v4
+        with:
+          name: latency-report
+          path: results/latency.json
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build image and run test suite inside it
+        run: docker build -t bourse:ci . && docker run --rm bourse:ci

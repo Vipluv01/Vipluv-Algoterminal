@@ -1,0 +1,17 @@
+[project]
+name = "bourse-sim"
+version = "0.1.0"
+description = "Agent-based market simulation and market-making, driven against the Go matching engine over a JSON subprocess protocol."
+requires-python = ">=3.12"
+dependencies = ["numpy", "scipy", "websockets"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+pythonpath = ["bourse_sim"]
+testpaths = ["tests"]
