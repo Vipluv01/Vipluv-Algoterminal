@@ -21,6 +21,17 @@
     display: grid; grid-template-columns: 260px 1fr 240px; gap: 12px;
     align-items: start;
   }
+  /* Below ~700px the two fixed-width side columns (260+240=500px, plus
+     gaps/padding) leave the middle column no room and force horizontal
+     scrolling with clipped text -- caught on the actual deployed page,
+     not a hypothetical: any browser window narrower than that (a laptop
+     with a split screen, a smaller display, a phone) hit this. Stack
+     everything into one column instead of trying to keep three panels
+     side by side in too little space. */
+  @media (max-width: 700px) {
+    .grid { grid-template-columns: 1fr; }
+    body { padding: 12px; }
+  }
   .panel {
     background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
     padding: 12px;
