@@ -10,12 +10,21 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bourse_sim"))
 
 from websockets.datastructures import Headers
 from websockets.http11 import Request
 
-from demo_server import MAX_INFORMED_TRADERS, LiveSim, serve_static_or_upgrade
+from demo_server import (
+    MAX_INFORMED_TRADERS,
+    MAX_ORDER_QTY,
+    MAX_OPEN_ORDERS_PER_HUMAN,
+    HumanTrader,
+    LiveSim,
+    serve_static_or_upgrade,
+)
 
 
 def test_step_produces_json_serializable_output():
@@ -133,3 +142,194 @@ def test_healthz_does_not_require_the_full_page_body():
 
 async def _maybe_await(value):
     return await value if asyncio.iscoroutine(value) else value
+
+
+# --- Human trading (order entry, cancel, fill attribution) ---
+
+
+def test_register_human_gets_a_reserved_trader_id_distinct_from_bots():
+    sim = LiveSim(seed=1)
+    try:
+        h = sim.register_human()
+        assert h.trader_id >= 10_000
+        assert h.trader_id not in sim.maker_ids
+        assert h.trader_id not in {t.trader_id for t in sim.noise_traders + sim.informed_traders}
+    finally:
+        sim.close()
+
+
+def test_submit_order_rejects_invalid_side_and_type_and_qty():
+    sim = LiveSim(seed=1)
+    try:
+        h = sim.register_human()
+        assert sim.submit_human_order(h, side="up", qty=1, px=100.0, order_type="limit")["ok"] is False
+        assert sim.submit_human_order(h, side="buy", qty=1, px=100.0, order_type="stop")["ok"] is False
+        assert sim.submit_human_order(h, side="buy", qty=0, px=100.0, order_type="limit")["ok"] is False
+        assert sim.submit_human_order(h, side="buy", qty=-5, px=100.0, order_type="limit")["ok"] is False
+        assert sim.submit_human_order(h, side="buy", qty=MAX_ORDER_QTY + 1, px=100.0, order_type="limit")["ok"] is False
+    finally:
+        sim.close()
+
+
+def test_limit_order_requires_a_positive_price():
+    sim = LiveSim(seed=1)
+    try:
+        h = sim.register_human()
+        assert sim.submit_human_order(h, side="buy", qty=1, px=None, order_type="limit")["ok"] is False
+        assert sim.submit_human_order(h, side="buy", qty=1, px=0.0, order_type="limit")["ok"] is False
+        assert sim.submit_human_order(h, side="buy", qty=1, px=-1.0, order_type="limit")["ok"] is False
+    finally:
+        sim.close()
+
+
+def test_market_order_does_not_require_a_price():
+    """A market buy walks the seeded resting sell at start_ticks+5 -- no
+    price needed, unlike a limit order."""
+    sim = LiveSim(seed=1)
+    try:
+        h = sim.register_human()
+        result = sim.submit_human_order(h, side="buy", qty=5, px=None, order_type="market")
+        assert result["ok"] is True
+        assert h.inventory == 5
+        assert h.open_orders == {}
+    finally:
+        sim.close()
+
+
+def test_resting_limit_order_appears_in_open_orders_and_not_yet_filled():
+    sim = LiveSim(seed=1)
+    try:
+        h = sim.register_human()
+        # Priced far below the touch -- a passive resting buy, not a cross.
+        result = sim.submit_human_order(h, side="buy", qty=10, px=50.0, order_type="limit")
+        assert result["ok"] is True
+        assert result["filled_qty"] == 0
+        assert h.inventory == 0
+        assert len(h.open_orders) == 1
+        oid = result["order_id"]
+        assert h.open_orders[oid] == {"side": "buy", "px": 50.0, "qty": 10}
+    finally:
+        sim.close()
+
+
+def test_cancel_own_resting_order_removes_it_from_open_orders_and_the_book():
+    sim = LiveSim(seed=1)
+    try:
+        h = sim.register_human()
+        result = sim.submit_human_order(h, side="buy", qty=10, px=50.0, order_type="limit")
+        oid = result["order_id"]
+
+        cancel_result = sim.cancel_human_order(h, oid)
+        assert cancel_result["ok"] is True
+        assert h.open_orders == {}
+        # The engine itself must agree the order is gone -- cancelling twice
+        # should now fail (nothing left to cancel), proving this isn't just
+        # local bookkeeping drifting from the real book state.
+        assert sim.eng.cancel(oid) != "none"
+    finally:
+        sim.close()
+
+
+def test_cancel_rejects_an_order_id_this_human_does_not_own():
+    sim = LiveSim(seed=1)
+    try:
+        h1 = sim.register_human()
+        h2 = sim.register_human()
+        result = sim.submit_human_order(h1, side="buy", qty=10, px=50.0, order_type="limit")
+        oid = result["order_id"]
+
+        stolen = sim.cancel_human_order(h2, oid)
+        assert stolen["ok"] is False
+        assert oid in h1.open_orders, "a rejected cancel from a non-owner must leave the real owner's order untouched"
+    finally:
+        sim.close()
+
+
+def test_open_orders_are_capped_per_human():
+    sim = LiveSim(seed=1)
+    try:
+        h = sim.register_human()
+        # LiveSim's book only spans [s0*0.5, s0*2.0] = [50, 200] here --
+        # stay inside that range so a rejection can only mean the cap fired,
+        # not that the price was simply out of bounds.
+        for i in range(MAX_OPEN_ORDERS_PER_HUMAN):
+            result = sim.submit_human_order(h, side="sell", qty=1, px=150.0 + i, order_type="limit")
+            assert result["ok"] is True
+        over_limit = sim.submit_human_order(h, side="sell", qty=1, px=199.0, order_type="limit")
+        assert over_limit["ok"] is False
+        assert len(h.open_orders) == MAX_OPEN_ORDERS_PER_HUMAN
+    finally:
+        sim.close()
+
+
+def test_fill_against_a_resting_human_order_updates_inventory_and_shrinks_open_order():
+    """A second human's aggressive market sell should hit the first human's
+    resting buy -- proving _route()'s fill attribution works for humans on
+    BOTH the maker and taker side, not just when a human is the one calling
+    submit_human_order directly."""
+    sim = LiveSim(seed=1)
+    try:
+        maker = sim.register_human()
+        taker = sim.register_human()
+
+        # Must outbid the seed liquidity (resting buy at 99.95, see
+        # LiveSim.__post_init__) to actually become the best bid -- a
+        # market sell always hits the best bid first, so a worse-priced
+        # resting order here would get skipped in favor of the seed order,
+        # silently making this test check the wrong thing.
+        rest = sim.submit_human_order(maker, side="buy", qty=10, px=99.99, order_type="limit")
+        oid = rest["order_id"]
+
+        hit = sim.submit_human_order(taker, side="sell", qty=4, px=None, order_type="market")
+        assert hit["ok"] is True
+        assert hit["filled_qty"] == 4
+
+        assert maker.inventory == 4
+        assert taker.inventory == -4
+        assert maker.open_orders[oid]["qty"] == 6, "partial fill must shrink the resting qty, not clear it"
+    finally:
+        sim.close()
+
+
+def test_unregister_human_cancels_their_resting_orders_on_the_real_book():
+    sim = LiveSim(seed=1)
+    try:
+        h = sim.register_human()
+        sim.submit_human_order(h, side="buy", qty=10, px=50.0, order_type="limit")
+        assert len(h.open_orders) == 1
+
+        sim.unregister_human(h)
+        assert h.trader_id not in sim.humans_by_id
+        assert h.open_orders == {}
+    finally:
+        sim.close()
+
+
+def test_order_result_echoes_the_requested_order_type():
+    """Regression test: found live in the browser demo. A market order that
+    filled nothing (empty bid/ask side -- common here, see
+    sim/KNOWN_ISSUES.md) needs a different frontend message than a limit
+    order resting, since a market order can never rest. Distinguishing them
+    client-side requires order_type actually being in the response --
+    it was missing until this was caught."""
+    sim = LiveSim(seed=1)
+    try:
+        h = sim.register_human()
+        limit_result = sim.submit_human_order(h, side="buy", qty=1, px=50.0, order_type="limit")
+        assert limit_result["order_type"] == "limit"
+        market_result = sim.submit_human_order(h, side="sell", qty=1, px=None, order_type="market")
+        assert market_result["order_type"] == "market"
+    finally:
+        sim.close()
+
+
+def test_humantrader_mark_to_market_matches_markermaker_style_accounting():
+    """Same formula MarketMaker uses (agents.py): cash plus inventory
+    priced at the current mid, converted from ticks at the boundary."""
+    h = HumanTrader(trader_id=10_001, tick_size=0.01)
+    h.on_fill("buy", 10, 10_000)  # bought 10 @ 100.00
+    assert h.cash == -100_000.0
+    pnl_at_same_price = h.mark_to_market(10_000)
+    assert pnl_at_same_price == pytest.approx(0.0)
+    pnl_after_rally = h.mark_to_market(10_100)  # price rose to 101.00
+    assert pnl_after_rally == pytest.approx(10.0)

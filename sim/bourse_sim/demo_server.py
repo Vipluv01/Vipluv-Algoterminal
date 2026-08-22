@@ -37,7 +37,71 @@ from simulate import owner_of_order_id, to_ticks_static
 # watching. 50 is far more than the demo's own UI would ever spawn by hand.
 MAX_INFORMED_TRADERS = 50
 
+# Same public-abuse reasoning applies to a human's own order flow: without a
+# ceiling, one visitor could submit orders in a tight client-side loop and
+# either flood the book with resting orders or force the server to do
+# unbounded per-step work, degrading the shared live market for everyone
+# else watching the same session.
+MAX_ORDER_QTY = 5000
+MAX_OPEN_ORDERS_PER_HUMAN = 20
+
+# Human trader ids live in their own reserved range, well clear of the bots
+# (noise=100-119, informed=200+, maker=1) and the seed-liquidity owner
+# (999) -- a collision would misattribute fills via owner_of_order_id.
+FIRST_HUMAN_TRADER_ID = 10_000
+
 INDEX_HTML_PATH = Path(__file__).resolve().parents[1] / "demo" / "index.html"
+
+
+@dataclass
+class HumanTrader:
+    """A visiting browser's own trading identity in the shared live market.
+
+    Deliberately NOT a variant of agents.py's MarketMaker/NoiseTrader --
+    those are validated SIMULATION agents whose behavior feeds the project's
+    actual research results, and reusing them here (even by subclassing)
+    would risk this purely-interactive, unvalidated code path leaking into
+    that. inventory/cash/on_fill/mark_to_market intentionally mirror
+    MarketMaker's own fields (see agents.py) because it's the same simple,
+    already-correct accounting -- fills move inventory and cash in opposite
+    directions, mark-to-market is cash plus inventory priced at the current
+    mid -- not because the two classes are meant to be interchangeable.
+    """
+
+    trader_id: int
+    tick_size: float
+    inventory: int = field(default=0, init=False)
+    cash: float = field(default=0.0, init=False)
+    # order_id -> {"side", "px", "qty"} for this human's own RESTING orders
+    # only -- immediately-filled quantity never enters this dict. Tracked
+    # here, not queried from the engine, because there's no wire op to list
+    # orders by owner; the demo server is the only writer of this human's
+    # orders, so it can just keep its own ledger in sync as it goes.
+    open_orders: dict = field(default_factory=dict, init=False)
+    _seq: int = field(default=0, init=False)
+
+    def next_order_id(self) -> int:
+        self._seq += 1
+        return self.trader_id * 10_000_000 + self._seq
+
+    def on_fill(self, side: str, qty: int, px_ticks: int) -> None:
+        if side == "buy":
+            self.inventory += qty
+            self.cash -= qty * px_ticks
+        else:
+            self.inventory -= qty
+            self.cash += qty * px_ticks
+
+    def mark_to_market(self, mid_ticks: int) -> float:
+        return (self.cash + self.inventory * mid_ticks) * self.tick_size
+
+    def reduce_open_order(self, order_id: int, qty: int) -> None:
+        entry = self.open_orders.get(order_id)
+        if entry is None:
+            return
+        entry["qty"] -= qty
+        if entry["qty"] <= 0:
+            del self.open_orders[order_id]
 
 
 @dataclass
@@ -70,6 +134,8 @@ class LiveSim:
         self.maker = MarketMaker(trader_id=1, tick_size=self.tick_size, quote_size=100)
         self.maker_ids = {self.maker.trader_id}
         self._next_informed_id = 300
+        self.humans_by_id: dict[int, HumanTrader] = {}
+        self._next_human_trader_id = FIRST_HUMAN_TRADER_ID
 
         self.eng = Engine(min_px=self.min_px, max_px=self.max_px, tick=1, capacity=1 << 18)
         start_ticks = to_ticks_static(self.s0, self.tick_size)
@@ -95,6 +161,62 @@ class LiveSim:
     def set_volatility(self, sigma: float) -> None:
         self.fundamental.sigma = max(0.01, min(2.0, sigma))
 
+    def register_human(self) -> HumanTrader:
+        self._next_human_trader_id += 1
+        h = HumanTrader(trader_id=self._next_human_trader_id, tick_size=self.tick_size)
+        self.humans_by_id[h.trader_id] = h
+        return h
+
+    def unregister_human(self, human: HumanTrader) -> None:
+        # Cancel first: an orphaned resting order from a visitor who closed
+        # the tab would otherwise sit on the book indefinitely as bogus
+        # liquidity nobody can ever manage, silently distorting the shared
+        # market everyone else is still watching.
+        for order_id in list(human.open_orders.keys()):
+            self.eng.cancel(order_id)
+        human.open_orders.clear()
+        self.humans_by_id.pop(human.trader_id, None)
+
+    def submit_human_order(self, human: HumanTrader, *, side, qty, px, order_type) -> dict:
+        if side not in ("buy", "sell"):
+            return {"ok": False, "error": "side must be 'buy' or 'sell'"}
+        if order_type not in ("limit", "market"):
+            return {"ok": False, "error": "order_type must be 'limit' or 'market'"}
+        if not isinstance(qty, int) or not (0 < qty <= MAX_ORDER_QTY):
+            return {"ok": False, "error": f"qty must be a whole number between 1 and {MAX_ORDER_QTY}"}
+
+        px_ticks = 0
+        if order_type == "limit":
+            if px is None or px <= 0:
+                return {"ok": False, "error": "limit orders need a positive price"}
+            if len(human.open_orders) >= MAX_OPEN_ORDERS_PER_HUMAN:
+                return {"ok": False, "error": f"too many open orders (max {MAX_OPEN_ORDERS_PER_HUMAN}) -- cancel one first"}
+            px_ticks = to_ticks_static(px, self.tick_size)
+
+        order_id = human.next_order_id()
+        result = self.eng.submit(order_id=order_id, side=side, qty=qty, px=px_ticks,
+                                  owner=human.trader_id, order_type=order_type, tif="gtc")
+        new_trades = self._route(result)
+
+        if result.accepted and order_type == "limit":
+            resting = qty - result.filled_qty
+            if resting > 0:
+                human.open_orders[order_id] = {"side": side, "px": px, "qty": resting}
+
+        return {
+            "ok": result.accepted, "reject": result.reject, "order_id": order_id,
+            "filled_qty": result.filled_qty, "trades": new_trades, "order_type": order_type,
+        }
+
+    def cancel_human_order(self, human: HumanTrader, order_id: int) -> dict:
+        if order_id not in human.open_orders:
+            return {"ok": False, "error": "not your open order (already filled or cancelled)"}
+        reject = self.eng.cancel(order_id)
+        if reject != "none":
+            return {"ok": False, "error": reject}
+        del human.open_orders[order_id]
+        return {"ok": True, "order_id": order_id}
+
     def _route(self, result) -> list[dict]:
         new_trades = []
         if result is None:
@@ -106,6 +228,13 @@ class LiveSim:
                 self.maker.on_fill("sell" if f.taker_side == "buy" else "buy", f.qty, f.px)
             elif to_ in self.maker_ids:
                 self.maker.on_fill(f.taker_side, f.qty, f.px)
+            maker_human = self.humans_by_id.get(mo)
+            if maker_human is not None:
+                maker_human.on_fill("sell" if f.taker_side == "buy" else "buy", f.qty, f.px)
+                maker_human.reduce_open_order(f.maker_id, f.qty)
+            taker_human = self.humans_by_id.get(to_)
+            if taker_human is not None:
+                taker_human.on_fill(f.taker_side, f.qty, f.px)
         return new_trades
 
     def step(self) -> dict:
@@ -157,6 +286,10 @@ class LiveSim:
 
 
 CLIENTS: set = set()
+# ws -> HumanTrader, mirrored 1:1 with CLIENTS -- kept as a separate dict
+# (rather than folded into LiveSim, which is recreated fresh by sim_loop)
+# so a connection's identity survives independently of simulation state.
+HUMANS_BY_WS: dict = {}
 SIM: LiveSim | None = None
 
 
@@ -167,6 +300,30 @@ async def broadcast(msg: dict) -> None:
     await asyncio.gather(*(c.send(data) for c in list(CLIENTS)), return_exceptions=True)
 
 
+async def send_human_states() -> None:
+    """Per-client personal state (position/P&L/open orders) -- deliberately
+    NOT folded into the shared broadcast() message, since every other
+    client's browser would otherwise receive (and have to ignore) every
+    other visitor's private trading state on every single tick."""
+    if not HUMANS_BY_WS or SIM is None:
+        return
+    mid_ticks = SIM.last_known_mid_ticks
+
+    async def _send(ws, human: HumanTrader) -> None:
+        payload = json.dumps({
+            "type": "your_state",
+            "position": human.inventory,
+            "pnl": human.mark_to_market(mid_ticks),
+            "open_orders": [{"order_id": oid, **info} for oid, info in human.open_orders.items()],
+        })
+        try:
+            await ws.send(payload)
+        except websockets.exceptions.ConnectionClosed:
+            pass
+
+    await asyncio.gather(*(_send(ws, h) for ws, h in list(HUMANS_BY_WS.items())), return_exceptions=True)
+
+
 async def sim_loop() -> None:
     global SIM
     SIM = LiveSim()
@@ -175,13 +332,36 @@ async def sim_loop() -> None:
             if not SIM.paused:
                 msg = SIM.step()
                 await broadcast(msg)
+                await send_human_states()
             await asyncio.sleep(SIM.speed_ms / 1000.0)
     finally:
         SIM.close()
 
 
+def _parse_order_cmd(cmd: dict) -> dict | None:
+    """Turns raw client JSON into the kwargs submit_human_order expects, or
+    None if it's malformed -- isolated from the dispatch loop below so a
+    bad qty/px from a client (wrong type, missing field, garbage string)
+    can't take the whole connection handler down with an uncaught
+    ValueError/TypeError, the same defensive-parsing discipline the Go wire
+    protocol already applies to every field it reads from a request."""
+    try:
+        side = cmd.get("side")
+        order_type = cmd.get("order_type", "limit")
+        qty = int(cmd.get("qty"))
+        raw_px = cmd.get("px")
+        px = float(raw_px) if raw_px not in (None, "") else None
+        return {"side": side, "qty": qty, "px": px, "order_type": order_type}
+    except (TypeError, ValueError):
+        return None
+
+
 async def handle_client(ws) -> None:
     CLIENTS.add(ws)
+    human = SIM.register_human() if SIM is not None else None
+    if human is not None:
+        HUMANS_BY_WS[ws] = human
+        await ws.send(json.dumps({"type": "welcome", "trader_id": human.trader_id}))
     try:
         async for raw in ws:
             if SIM is None:
@@ -190,21 +370,41 @@ async def handle_client(ws) -> None:
                 cmd = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-            if cmd.get("cmd") == "pause":
+            c = cmd.get("cmd")
+            if c == "pause":
                 SIM.paused = True
-            elif cmd.get("cmd") == "resume":
+            elif c == "resume":
                 SIM.paused = False
-            elif cmd.get("cmd") == "step":
+            elif c == "step":
                 m = SIM.step()
                 await broadcast(m)
-            elif cmd.get("cmd") == "add_informed":
+                await send_human_states()
+            elif c == "add_informed":
                 SIM.add_informed_trader()
-            elif cmd.get("cmd") == "set_volatility":
+            elif c == "set_volatility":
                 SIM.set_volatility(float(cmd.get("value", 0.25)))
-            elif cmd.get("cmd") == "set_speed":
+            elif c == "set_speed":
                 SIM.speed_ms = max(10, int(cmd.get("value", 150)))
+            elif c == "submit_order" and human is not None:
+                parsed = _parse_order_cmd(cmd)
+                result = (SIM.submit_human_order(human, **parsed) if parsed is not None
+                          else {"ok": False, "error": "malformed order"})
+                await ws.send(json.dumps({"type": "order_result", **result}))
+                await send_human_states()
+            elif c == "cancel_order" and human is not None:
+                try:
+                    order_id = int(cmd.get("order_id"))
+                except (TypeError, ValueError):
+                    result = {"ok": False, "error": "malformed order_id"}
+                else:
+                    result = SIM.cancel_human_order(human, order_id)
+                await ws.send(json.dumps({"type": "order_result", **result}))
+                await send_human_states()
     finally:
         CLIENTS.discard(ws)
+        HUMANS_BY_WS.pop(ws, None)
+        if human is not None and SIM is not None:
+            SIM.unregister_human(human)
 
 
 _INDEX_HTML_BYTES = INDEX_HTML_PATH.read_bytes()

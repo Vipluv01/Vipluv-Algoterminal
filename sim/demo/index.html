@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>bourse — live market</title>
 <style>
   :root {
@@ -18,20 +19,20 @@
   h1 { font-size: 15px; margin: 0 0 4px; font-weight: 600; letter-spacing: 0.02em; }
   .sub { color: var(--text-dim); font-size: 11px; margin-bottom: 16px; }
   .grid {
-    display: grid; grid-template-columns: 260px 1fr 240px; gap: 12px;
+    display: grid; grid-template-columns: 260px 1fr 280px; gap: 12px;
     align-items: start;
   }
-  /* Below ~700px the two fixed-width side columns (260+240=500px, plus
-     gaps/padding) leave the middle column no room and force horizontal
-     scrolling with clipped text -- caught on the actual deployed page,
-     not a hypothetical: any browser window narrower than that (a laptop
-     with a split screen, a smaller display, a phone) hit this. Stack
-     everything into one column instead of trying to keep three panels
-     side by side in too little space. */
+  /* Below ~700px the fixed-width side columns leave the middle column no
+     room and force horizontal scrolling with clipped text -- caught on the
+     actual deployed page, not a hypothetical: any browser window narrower
+     than that (a laptop with a split screen, a smaller display, a phone)
+     hit this. Stack everything into one column instead of trying to keep
+     three columns side by side in too little space. */
   @media (max-width: 700px) {
     .grid { grid-template-columns: 1fr; }
     body { padding: 12px; }
   }
+  .col-right { display: flex; flex-direction: column; gap: 12px; }
   .panel {
     background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
     padding: 12px;
@@ -41,7 +42,7 @@
     color: var(--text-dim); margin: 0 0 8px; font-weight: 600;
   }
   /* depth ladder */
-  .row { display: flex; justify-content: space-between; padding: 2px 6px; font-variant-numeric: tabular-nums; position: relative; }
+  .row { display: flex; justify-content: space-between; align-items: center; padding: 2px 6px; font-variant-numeric: tabular-nums; position: relative; }
   .row .bar { position: absolute; top: 0; bottom: 0; right: 0; opacity: 0.18; z-index: 0; }
   .row span { position: relative; z-index: 1; }
   .ask-row .bar { background: var(--ask); }
@@ -51,12 +52,13 @@
   .mid-row { text-align: center; padding: 6px 0; color: var(--accent); font-weight: 600; border-top: 1px dashed var(--border); border-bottom: 1px dashed var(--border); margin: 2px 0; }
   /* chart */
   #chart { width: 100%; height: 320px; display: block; background: var(--panel-alt); border-radius: 4px; }
+  .caption { color: var(--text-dim); font-size: 10px; margin-top: 6px; line-height: 1.5; }
   /* tape */
   #tape { height: 180px; overflow-y: auto; font-size: 11px; }
   #tape div { padding: 2px 4px; display: flex; justify-content: space-between; }
   .tape-buy { color: #7ee6a0; }
   .tape-sell { color: #ff8a80; }
-  /* maker panel */
+  /* stat rows (market maker / your position) */
   .stat { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--border); }
   .stat:last-child { border-bottom: none; }
   .stat .v { font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -70,10 +72,33 @@
   button:hover { border-color: var(--accent); }
   button.active { background: var(--accent); color: #04101f; border-color: var(--accent); }
   input[type=range] { width: 100%; }
+  input[type=number] {
+    width: 100%; background: var(--panel-alt); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 6px 8px; font-family: inherit; font-size: 12px; margin: 2px 0 4px;
+  }
+  input[type=number]:focus { outline: none; border-color: var(--accent); }
   label { font-size: 10px; color: var(--text-dim); display: block; margin-top: 10px; }
   #status { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); margin-right: 5px; }
   #status.live { background: var(--bid); box-shadow: 0 0 6px var(--bid); }
   #status.dead { background: var(--ask); }
+  /* order entry: buy/sell + limit/market toggles */
+  .toggle-group { display: flex; gap: 4px; margin: 0 0 8px; }
+  .toggle-group button { flex: 1; margin: 0; text-align: center; }
+  .side-btn.buy.active { background: var(--bid); color: #04170d; border-color: var(--bid); }
+  .side-btn.sell.active { background: var(--ask); color: #210606; border-color: var(--ask); }
+  .submit-btn { font-weight: 600; width: 100%; margin-top: 10px; padding: 9px; }
+  .submit-btn.buy { background: var(--bid); color: #04170d; border-color: var(--bid); }
+  .submit-btn.sell { background: var(--ask); color: #210606; border-color: var(--ask); }
+  .feedback { font-size: 11px; margin-top: 6px; min-height: 14px; }
+  .feedback.ok { color: var(--bid); }
+  .feedback.err { color: var(--ask); }
+  /* your open orders */
+  .your-order-row span:first-child { min-width: 66px; }
+  .cancel-btn { padding: 2px 7px; font-size: 10px; margin: 0; }
+  .cancel-btn:hover { border-color: var(--ask); color: var(--ask); }
+  .footer { margin-top: 20px; color: var(--text-dim); font-size: 11px; text-align: center; }
+  .footer a { color: var(--accent); text-decoration: none; }
+  .footer a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -92,28 +117,69 @@
   <div class="panel">
     <h2>Price</h2>
     <canvas id="chart"></canvas>
+    <div class="caption">Candlesticks of the mid-price series — the same series <code>stylized_facts.py</code> validates against real-market statistics. Price emerges from order flow here; it isn't assigned by a formula.</div>
     <h2 style="margin-top:12px">Trade Tape</h2>
     <div id="tape"></div>
   </div>
 
-  <div class="panel">
-    <h2>Market Maker</h2>
-    <div class="stat"><span>Inventory</span><span class="v" id="mm-inv">0</span></div>
-    <div class="stat"><span>Mark-to-market P&amp;L</span><span class="v" id="mm-pnl">₹0.00</span></div>
-    <div class="stat"><span>Quoted spread (ticks)</span><span class="v" id="mm-spread">—</span></div>
-    <div class="stat"><span>Fundamental value</span><span class="v" id="fund">—</span></div>
+  <div class="col-right">
+    <div class="panel">
+      <h2>Trade</h2>
+      <div class="toggle-group">
+        <button id="side-buy" class="side-btn buy active">Buy</button>
+        <button id="side-sell" class="side-btn sell">Sell</button>
+      </div>
+      <div class="toggle-group">
+        <button id="type-limit" class="type-btn active">Limit</button>
+        <button id="type-market" class="type-btn">Market</button>
+      </div>
+      <label>Quantity</label>
+      <input type="number" id="order-qty" value="10" min="1" max="5000" step="1">
+      <div id="px-row">
+        <label>Price (₹)</label>
+        <input type="number" id="order-px" value="100.00" min="0" step="0.01">
+      </div>
+      <button id="btn-submit-order" class="submit-btn buy">Submit Buy</button>
+      <div id="order-feedback" class="feedback"></div>
+    </div>
 
-    <h2 style="margin-top:16px">Controls</h2>
-    <button id="btn-pause">Pause</button>
-    <button id="btn-step">Step ×1</button>
-    <button id="btn-informed">+ Informed trader</button>
+    <div class="panel">
+      <h2>Your Position</h2>
+      <div class="stat"><span>Position</span><span class="v" id="you-pos">0</span></div>
+      <div class="stat"><span>Mark-to-market P&amp;L</span><span class="v" id="you-pnl">₹0.00</span></div>
+    </div>
 
-    <label>Simulation speed</label>
-    <input type="range" id="speed" min="10" max="500" value="150" step="10">
+    <div class="panel">
+      <h2>Your Open Orders</h2>
+      <div id="your-orders"><div class="row" style="color:var(--text-dim)">no open orders</div></div>
+    </div>
 
-    <label>Fundamental volatility (σ)</label>
-    <input type="range" id="vol" min="1" max="150" value="25">
+    <div class="panel">
+      <h2>Market Maker (bot)</h2>
+      <div class="stat"><span>Inventory</span><span class="v" id="mm-inv">0</span></div>
+      <div class="stat"><span>Mark-to-market P&amp;L</span><span class="v" id="mm-pnl">₹0.00</span></div>
+      <div class="stat"><span>Quoted spread (ticks)</span><span class="v" id="mm-spread">—</span></div>
+      <div class="stat"><span>Fundamental value</span><span class="v" id="fund">—</span></div>
+    </div>
+
+    <div class="panel">
+      <h2>Simulation Controls</h2>
+      <button id="btn-pause">Pause</button>
+      <button id="btn-step">Step ×1</button>
+      <button id="btn-informed">+ Informed trader</button>
+
+      <label>Simulation speed</label>
+      <input type="range" id="speed" min="10" max="500" value="150" step="10">
+
+      <label>Fundamental volatility (σ)</label>
+      <input type="range" id="vol" min="1" max="150" value="25">
+    </div>
   </div>
+</div>
+
+<div class="footer">
+  bourse — a from-scratch Go matching engine + Python agent-based market simulation.
+  <a href="https://github.com/Vipluv01/bourse1" target="_blank" rel="noopener">Source on GitHub →</a>
 </div>
 
 <script>
@@ -123,9 +189,19 @@
 // a deployed public URL (where "localhost:8765" would never be reachable).
 const WS_URL = (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
 let ws;
-let priceHistory = [];
-const MAX_HISTORY = 400;
 let paused = false;
+
+// Candlestick aggregation: bucket every CANDLE_SIZE ticks into one OHLC bar
+// client-side, rather than changing the wire protocol -- the server still
+// just streams a mid-price per tick, exactly as before.
+const CANDLE_SIZE = 5;
+const MAX_CANDLES = 120;
+let candles = [];
+let currentCandle = null;
+let tickCounter = 0;
+
+let currentSide = "buy";
+let currentType = "limit";
 
 function connect() {
   ws = new WebSocket(WS_URL);
@@ -133,7 +209,15 @@ function connect() {
   ws.onopen = () => { status.className = "live"; };
   ws.onclose = () => { status.className = "dead"; setTimeout(connect, 1500); };
   ws.onerror = () => { status.className = "dead"; };
-  ws.onmessage = (ev) => handleTick(JSON.parse(ev.data));
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "tick") handleTick(msg);
+    else if (msg.type === "your_state") handleYourState(msg);
+    else if (msg.type === "order_result") handleOrderResult(msg);
+    // "welcome" carries only our own trader_id, which nothing in the UI
+    // needs to display -- the server already scopes your_state/order_result
+    // to this connection, so no client-side bookkeeping of it is needed.
+  };
 }
 
 function send(cmd) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(cmd)); }
@@ -167,36 +251,69 @@ function renderTape(trades) {
   while (el.children.length > 60) el.removeChild(el.lastChild);
 }
 
+function pushPricePoint(mid) {
+  tickCounter++;
+  if (!currentCandle) {
+    currentCandle = { open: mid, high: mid, low: mid, close: mid };
+  } else {
+    currentCandle.high = Math.max(currentCandle.high, mid);
+    currentCandle.low = Math.min(currentCandle.low, mid);
+    currentCandle.close = mid;
+  }
+  if (tickCounter % CANDLE_SIZE === 0) {
+    candles.push(currentCandle);
+    if (candles.length > MAX_CANDLES) candles.shift();
+    currentCandle = null;
+  }
+}
+
 function drawChart() {
   const canvas = document.getElementById("chart");
   const ctx = canvas.getContext("2d");
   const w = canvas.clientWidth, h = canvas.clientHeight;
   canvas.width = w * devicePixelRatio; canvas.height = h * devicePixelRatio;
-  ctx.scale(devicePixelRatio, devicePixelRatio);
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  if (priceHistory.length < 2) return;
 
-  const min = Math.min(...priceHistory), max = Math.max(...priceHistory);
-  const pad = (max - min) * 0.1 || 0.5;
+  // Include the in-progress candle so the chart updates every tick, not
+  // just once every CANDLE_SIZE ticks -- otherwise the chart would look
+  // stalled for several seconds at a time even though the market is live.
+  const display = currentCandle ? [...candles, currentCandle] : candles;
+  if (display.length < 2) return;
+
+  const highs = display.map(c => c.high), lows = display.map(c => c.low);
+  const min = Math.min(...lows), max = Math.max(...highs);
+  const pad = (max - min) * 0.08 || 0.5;
   const lo = min - pad, hi = max + pad;
   const yOf = (v) => h - ((v - lo) / (hi - lo)) * h;
-  const xOf = (i) => (i / (MAX_HISTORY - 1)) * w;
 
-  ctx.strokeStyle = "#4a9eff";
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  priceHistory.forEach((v, i) => {
-    const x = xOf(MAX_HISTORY - priceHistory.length + i), y = yOf(v);
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  ctx.strokeStyle = "rgba(125,139,160,0.15)";
+  ctx.fillStyle = "#7d8ba0";
+  ctx.font = "10px monospace";
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 3; i++) {
+    const v = lo + (hi - lo) * i / 3;
+    const y = yOf(v);
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    ctx.fillText("₹" + v.toFixed(2), 4, Math.max(10, y - 2));
+  }
+
+  const n = display.length;
+  const slot = w / n;
+  const bodyW = Math.max(2, slot * 0.6);
+  display.forEach((c, i) => {
+    const x = i * slot + slot / 2;
+    const up = c.close >= c.open;
+    ctx.strokeStyle = ctx.fillStyle = up ? "#2ecc71" : "#e74c3c";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, yOf(c.high));
+    ctx.lineTo(x, yOf(c.low));
+    ctx.stroke();
+    const yO = yOf(c.open), yC = yOf(c.close);
+    const top = Math.min(yO, yC), height = Math.max(1, Math.abs(yO - yC));
+    ctx.fillRect(x - bodyW / 2, top, bodyW, height);
   });
-  ctx.stroke();
-
-  // faint fill under the line
-  ctx.lineTo(xOf(MAX_HISTORY - 1), h);
-  ctx.lineTo(xOf(MAX_HISTORY - priceHistory.length), h);
-  ctx.closePath();
-  ctx.fillStyle = "rgba(74,158,255,0.08)";
-  ctx.fill();
 }
 
 function handleTick(msg) {
@@ -208,9 +325,13 @@ function handleTick(msg) {
   renderDepth(msg.asks, "ask");
   renderTape(msg.trades);
 
-  priceHistory.push(msg.mid);
-  if (priceHistory.length > MAX_HISTORY) priceHistory.shift();
+  pushPricePoint(msg.mid);
   drawChart();
+
+  // Track the live mid by default, but never fight the visitor while
+  // they're actively typing a price into the order form.
+  const pxInput = document.getElementById("order-px");
+  if (document.activeElement !== pxInput) pxInput.value = msg.mid.toFixed(2);
 
   const inv = document.getElementById("mm-inv");
   inv.textContent = msg.maker.inventory;
@@ -223,6 +344,80 @@ function handleTick(msg) {
   document.getElementById("mm-spread").textContent = msg.maker.spread_ticks.toFixed(1);
 }
 
+function handleYourState(msg) {
+  const pos = document.getElementById("you-pos");
+  pos.textContent = msg.position;
+  pos.className = "v " + (msg.position > 0 ? "pos" : msg.position < 0 ? "neg" : "");
+
+  const pnl = document.getElementById("you-pnl");
+  pnl.textContent = fmtMoney(msg.pnl);
+  pnl.className = "v " + (msg.pnl >= 0 ? "pos" : "neg");
+
+  renderYourOrders(msg.open_orders);
+}
+
+function renderYourOrders(orders) {
+  const el = document.getElementById("your-orders");
+  if (!orders.length) { el.innerHTML = '<div class="row" style="color:var(--text-dim)">no open orders</div>'; return; }
+  el.innerHTML = orders.map(o => `
+    <div class="row your-order-row">
+      <span class="${o.side === 'buy' ? 'bid-row' : 'ask-row'}">${o.side === 'buy' ? '▲' : '▼'} ₹${o.px.toFixed(2)}</span>
+      <span>${o.qty}</span>
+      <button class="cancel-btn" data-oid="${o.order_id}">cancel</button>
+    </div>`).join("");
+  el.querySelectorAll(".cancel-btn").forEach((btn) => {
+    btn.onclick = () => send({ cmd: "cancel_order", order_id: parseInt(btn.dataset.oid, 10) });
+  });
+}
+
+function handleOrderResult(msg) {
+  const el = document.getElementById("order-feedback");
+  if (msg.ok) {
+    // "resting" only makes sense for a limit order -- a market order that
+    // filled nothing didn't start resting, it just found no liquidity to
+    // match against (thin/one-sided books are common here, see
+    // sim/KNOWN_ISSUES.md). Reusing "order resting" for that case was
+    // caught live: a market sell during a momentarily empty bid side
+    // showed "order resting" for an order type that can never rest.
+    if (msg.filled_qty > 0) {
+      el.textContent = `filled ${msg.filled_qty}`;
+    } else if (msg.order_type === "market") {
+      el.textContent = "no fill — no liquidity on the other side right now";
+    } else {
+      el.textContent = "order resting";
+    }
+    el.className = "feedback ok";
+  } else {
+    el.textContent = msg.error || msg.reject || "order rejected";
+    el.className = "feedback err";
+  }
+  clearTimeout(handleOrderResult._t);
+  handleOrderResult._t = setTimeout(() => { el.textContent = ""; el.className = "feedback"; }, 4000);
+}
+
+function updateSideUI() {
+  document.getElementById("side-buy").classList.toggle("active", currentSide === "buy");
+  document.getElementById("side-sell").classList.toggle("active", currentSide === "sell");
+  const btn = document.getElementById("btn-submit-order");
+  btn.textContent = "Submit " + (currentSide === "buy" ? "Buy" : "Sell");
+  btn.className = "submit-btn " + currentSide;
+}
+function updateTypeUI() {
+  document.getElementById("type-limit").classList.toggle("active", currentType === "limit");
+  document.getElementById("type-market").classList.toggle("active", currentType === "market");
+  document.getElementById("px-row").style.display = currentType === "limit" ? "" : "none";
+}
+
+document.getElementById("side-buy").onclick = () => { currentSide = "buy"; updateSideUI(); };
+document.getElementById("side-sell").onclick = () => { currentSide = "sell"; updateSideUI(); };
+document.getElementById("type-limit").onclick = () => { currentType = "limit"; updateTypeUI(); };
+document.getElementById("type-market").onclick = () => { currentType = "market"; updateTypeUI(); };
+document.getElementById("btn-submit-order").onclick = () => {
+  const qty = parseInt(document.getElementById("order-qty").value, 10);
+  const px = currentType === "limit" ? parseFloat(document.getElementById("order-px").value) : null;
+  send({ cmd: "submit_order", side: currentSide, order_type: currentType, qty: qty, px: px });
+};
+
 document.getElementById("btn-pause").onclick = (e) => {
   paused = !paused;
   send({ cmd: paused ? "pause" : "resume" });
@@ -234,6 +429,8 @@ document.getElementById("btn-informed").onclick = () => send({ cmd: "add_informe
 document.getElementById("speed").oninput = (e) => send({ cmd: "set_speed", value: e.target.value });
 document.getElementById("vol").oninput = (e) => send({ cmd: "set_volatility", value: e.target.value / 100 });
 
+updateSideUI();
+updateTypeUI();
 window.onresize = drawChart;
 connect();
 </script>
