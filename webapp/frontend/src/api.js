@@ -60,6 +60,12 @@ export const api = {
       delete: (id) => request("DELETE", `/dashboard/notes/${id}`),
     },
   },
+
+  pairs: {
+    overview: () => request("GET", "/pairs/overview"),
+    analytics: () => request("GET", "/pairs/analytics"),
+    close: () => request("POST", "/pairs/close"),
+  },
 };
 
 // Opens a live market WebSocket for one symbol. Returns an unsubscribe

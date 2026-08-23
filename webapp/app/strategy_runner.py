@@ -64,7 +64,8 @@ def _current_pair_position(db: Session, user_id: int) -> str:
 
 
 def _submit_paper_order(db: Session, registry: MarketRegistry, *, user_id: int, strategy_key: str,
-                         symbol: str, side: str, qty: int, order_type: str, px: float | None) -> None:
+                         symbol: str, side: str, qty: int, order_type: str, px: float | None,
+                         entry_zscore: float | None = None) -> None:
     market = registry[symbol]
     px_ticks = 0
     if order_type == "limit":
@@ -91,6 +92,7 @@ def _submit_paper_order(db: Session, registry: MarketRegistry, *, user_id: int, 
         user_id=user_id, mode=Mode.paper, strategy_key=strategy_key, symbol=symbol,
         side=Side(side), order_type=OrderType(order_type), qty=qty, px=px, status=status,
         filled_qty=result.filled_qty, avg_fill_px=avg_fill_px, engine_order_id=order_id,
+        entry_zscore=entry_zscore,
     ))
 
     if result.filled_qty > 0:
@@ -150,15 +152,22 @@ def _run_pairs(db: Session, registry: MarketRegistry, alloc: StrategyAllocation)
     if result is None:
         return
 
+    # entry_zscore only means something for an ENTRY (new_position != "none")
+    # -- a close's Order rows aren't opening anything, so there's no "entered
+    # at" value to record for them.
+    entry_zscore = result.zscore if result.new_position != "none" else None
+
     if result.signal_a is not None:
         _submit_paper_order(
             db, registry, user_id=alloc.user_id, strategy_key=PAIRS_STRATEGY_KEY, symbol=PAIRS_SYMBOL_A,
             side=result.signal_a.side, qty=result.signal_a.qty,
             order_type=result.signal_a.order_type, px=result.signal_a.px,
+            entry_zscore=entry_zscore,
         )
     if result.signal_b is not None:
         _submit_paper_order(
             db, registry, user_id=alloc.user_id, strategy_key=PAIRS_STRATEGY_KEY, symbol=PAIRS_SYMBOL_B,
             side=result.signal_b.side, qty=result.signal_b.qty,
             order_type=result.signal_b.order_type, px=result.signal_b.px,
+            entry_zscore=entry_zscore,
         )

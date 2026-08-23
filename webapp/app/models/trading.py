@@ -113,6 +113,12 @@ class Order(Base):
     # pending_confirmation never has one yet either (see routers/orders.py:
     # this field being non-null is the actual proof a real trade happened).
     broker_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Only ever set for pairs_cointegration entry orders -- the spread
+    # z-score at the moment this order was submitted, threaded through from
+    # PairSignal.zscore (app/strategies/pairs_cointegration.py) so the Pair
+    # Overview page can show "entered at z=X" instead of that number being
+    # computed once for the trade decision and then thrown away.
+    entry_zscore: Mapped[float | None] = mapped_column(Float, nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 

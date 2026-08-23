@@ -6,7 +6,7 @@ without crashing."""
 import numpy as np
 import pytest
 
-from app.strategies.pairs_cointegration import PairSnapshot, PairsCointegrationStrategy
+from app.strategies.pairs_cointegration import PairSnapshot, PairsCointegrationStrategy, compute_pair_stats
 
 
 def _cointegrated_pair(n=300, seed=0, spread_amplitude=0.0):
@@ -112,6 +112,74 @@ def test_leg_b_quantity_is_scaled_by_the_hedge_ratio_not_equal_to_leg_a():
     expected_qty_b = max(1, round(10 * result.hedge_ratio))
     assert result.signal_b.qty == expected_qty_b
     assert result.hedge_ratio != 0
+
+
+def test_compute_pair_stats_returns_none_with_not_enough_history():
+    a, b = _cointegrated_pair(n=30)
+    assert compute_pair_stats(a, b, min_history=90) is None
+
+
+def test_compute_pair_stats_returns_none_on_mismatched_lengths():
+    a, _ = _cointegrated_pair(n=200)
+    b, _ = _cointegrated_pair(n=150)
+    assert compute_pair_stats(a, b, min_history=90) is None
+
+
+def test_compute_pair_stats_reports_cointegrated_pair_correctly():
+    a, b = _cointegrated_pair(n=300)
+    stats = compute_pair_stats(a, b, zscore_window=60, coint_pvalue_max=0.05, min_history=90)
+    assert stats is not None
+    assert stats.cointegration_pvalue < 0.05
+    assert stats.is_cointegrated is True
+    assert np.isfinite(stats.zscore)
+    assert np.isfinite(stats.hedge_ratio)
+    assert stats.hedge_ratio != 0
+    # A = B + constant + small noise by construction -- strongly positively correlated.
+    assert stats.correlation > 0.9
+
+
+def test_compute_pair_stats_flags_independent_walks_as_not_cointegrated_or_a_documented_false_positive():
+    a, b = _independent_walks()
+    stats = compute_pair_stats(a, b, coint_pvalue_max=0.05, min_history=90)
+    assert stats is not None
+    # Regression: statsmodels' coint() returns a plain python float for a
+    # CLIPPED extreme p-value but a numpy.float64 otherwise -- a strongly
+    # cointegrated pair's clipped p-value hides a numpy.bool_ leak here
+    # that ONLY non-extreme data (like these near-independent walks)
+    # surfaces. numpy.bool_ crashed FastAPI's response serialization live
+    # (confirmed via the running dev server, not just suspected).
+    assert isinstance(stats.is_cointegrated, bool)
+    if not stats.is_cointegrated:
+        assert stats.cointegration_pvalue > 0.05
+    else:
+        # Same stochastic false-positive allowance as evaluate_pair's own negative control.
+        assert stats.cointegration_pvalue <= 0.05
+
+
+def test_compute_pair_stats_series_are_capped_to_series_length():
+    a, b = _cointegrated_pair(n=300)
+    stats = compute_pair_stats(a, b, min_history=90, series_length=50)
+    assert stats is not None
+    assert len(stats.zscore_series) == 50
+    assert len(stats.hedge_ratio_series) == 50
+    assert len(stats.spread_series) == 50
+
+
+def test_compute_pair_stats_zscore_matches_current_zscore_from_evaluate_pair_for_the_same_input():
+    """Both compute_pair_stats and evaluate_pair independently compute a
+    'current' z-score off the same window logic -- they must agree on the
+    same input, since a display page showing one number and a trading
+    decision acting on a different one would be a real correctness bug."""
+    a, b = _cointegrated_pair(spread_amplitude=6.0)
+    strat = PairsCointegrationStrategy(entry_z=1.5, zscore_window=60, min_history=90)
+    pair = PairSnapshot("A", "B", a, b, position="none")
+    signal = strat.evaluate_pair(pair)
+    assert signal is not None
+
+    stats = compute_pair_stats(a, b, zscore_window=60, coint_pvalue_max=0.05, min_history=90)
+    assert stats is not None
+    assert stats.zscore == pytest.approx(signal.zscore, rel=1e-9)
+    assert stats.hedge_ratio == pytest.approx(signal.hedge_ratio, rel=1e-9)
 
 
 def test_stop_loss_closes_regardless_of_exit_threshold():

@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
+import pandas as pd
 from statsmodels.tsa.stattools import coint
 
 from app.strategies.base import Signal
@@ -61,6 +62,87 @@ class PairSignal:
     cointegration_pvalue: float
     zscore: float
     hedge_ratio: float
+
+
+@dataclass(frozen=True)
+class PairStats:
+    """A read-only snapshot of the pair's current statistics, for display
+    rather than trading -- everything a Pair Overview/Analytics page needs
+    (live z-score, hedge ratio, cointegration status, correlation) without
+    having to fire evaluate_pair() to get a value back, which returns None
+    on the vast majority of ticks where no entry/exit/stop condition is
+    met."""
+
+    hedge_ratio: float
+    cointegration_pvalue: float
+    is_cointegrated: bool
+    correlation: float
+    spread: float
+    zscore: float
+    zscore_series: list[float | None]
+    hedge_ratio_series: list[float]
+    spread_series: list[float]
+
+
+def compute_pair_stats(
+    prices_a: np.ndarray, prices_b: np.ndarray, *,
+    zscore_window: int = 60, coint_pvalue_max: float = 0.05,
+    min_history: int = 90, series_length: int = 300,
+) -> PairStats | None:
+    """Deliberately a SEPARATE function from evaluate_pair, not a shared
+    helper it also calls: evaluate_pair runs on every tick for every
+    enabled allocation (app/strategy_runner.py's tick loop), so its cost is
+    load-bearing, while this is only ever called on-demand when a user
+    actually opens a display page. Computing the full rolling z-score
+    SERIES below (pandas .rolling, needed for a chart) on every trading
+    tick would be pure waste evaluate_pair has no use for -- keeping this
+    separate keeps that cost off the hot path. The Kalman/cointegration
+    math itself is intentionally duplicated (a handful of lines), not
+    factored out, to avoid coupling the live trading path's performance to
+    a display feature's needs.
+    """
+    a, b = prices_a, prices_b
+    if len(a) < min_history or len(a) != len(b):
+        return None
+
+    kf = KalmanHedgeRatio()
+    betas = np.empty(len(a))
+    for i in range(len(a)):
+        betas[i] = kf.update(a[i], b[i])
+    spread = a - betas * b
+
+    _, pvalue, _ = coint(a, b)
+    correlation = float(np.corrcoef(a, b)[0, 1])
+
+    spread_s = pd.Series(spread)
+    rolling_mean = spread_s.rolling(zscore_window).mean()
+    rolling_std = spread_s.rolling(zscore_window).std(ddof=0)
+    zseries = ((spread_s - rolling_mean) / rolling_std).to_numpy()
+
+    window = spread[-zscore_window:]
+    std = window.std(ddof=0)
+    zscore = float((spread[-1] - window.mean()) / std) if std != 0 else float("nan")
+
+    tail = slice(-series_length, None)
+    return PairStats(
+        hedge_ratio=float(betas[-1]),
+        cointegration_pvalue=float(pvalue),
+        # statsmodels' coint() returns a plain python float for a CLIPPED
+        # extreme p-value but a numpy.float64 otherwise (confirmed directly
+        # -- not a guess) -- comparing a numpy.float64 to a python float
+        # yields numpy.bool_, which FastAPI's jsonable_encoder cannot
+        # serialize. bool(...) here is load-bearing, not decorative: found
+        # live when a strongly-cointegrated synthetic test pair (whose
+        # clipped p-value happens to already be a plain float) hid this
+        # exact bug, and only real, less-extreme market data surfaced it.
+        is_cointegrated=bool(pvalue <= coint_pvalue_max),
+        correlation=correlation,
+        spread=float(spread[-1]),
+        zscore=zscore,
+        zscore_series=[None if np.isnan(z) else float(z) for z in zseries[tail]],
+        hedge_ratio_series=betas[tail].tolist(),
+        spread_series=spread[tail].tolist(),
+    )
 
 
 class PairsCointegrationStrategy:
