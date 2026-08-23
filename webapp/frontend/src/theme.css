@@ -257,6 +257,38 @@ textarea.input { font-family: var(--font-ui); resize: vertical; min-height: 60px
 
 .mid-row { text-align: center; padding: 8px 0; margin: 3px 0; color: var(--accent-bright); font-weight: 700; font-family: var(--font-mono); border-top: 1px dashed var(--border); border-bottom: 1px dashed var(--border); }
 
+/* ---------- Chart toolbar + indicator picker ---------- */
+
+.candle-wrap { position: relative; background: var(--bg); }
+.candle-wrap:fullscreen { padding: 16px; }
+.candle-toolbar {
+  display: flex; align-items: center; gap: 6px; padding-bottom: 8px;
+}
+.candle-timeframes { max-width: 220px; }
+.indicator-picker-backdrop {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(5,7,12,0.6); backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center;
+}
+.indicator-picker {
+  width: 280px; max-height: 70vh; overflow-y: auto;
+  background: var(--surface); border: 1px solid var(--border-bright);
+  border-radius: 12px; padding: 14px; box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+}
+.indicator-picker-header {
+  display: flex; justify-content: space-between; align-items: center;
+  font-weight: 700; font-size: 13px; margin-bottom: 10px;
+}
+.indicator-picker-section {
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-faint); margin: 12px 0 4px;
+}
+.indicator-picker-row {
+  display: flex; align-items: center; gap: 9px; padding: 7px 4px;
+  font-size: 13px; cursor: pointer; border-radius: 6px;
+}
+.indicator-picker-row:hover { background: var(--surface-hover); }
+
 .badge {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 3px 9px; border-radius: 999px; font-size: 10.5px; font-weight: 700;
