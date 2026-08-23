@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from app.brackets import cancel_brackets_closed_elsewhere
 from app.markets import MarketRegistry
 from app.models.trading import Mode, Order, OrderStatus, OrderType, Side, StrategyAllocation
 from app.strategies.alpha import AlphaRSIEMAStrategy
@@ -91,6 +92,13 @@ def _submit_paper_order(db: Session, registry: MarketRegistry, *, user_id: int, 
         side=Side(side), order_type=OrderType(order_type), qty=qty, px=px, status=status,
         filled_qty=result.filled_qty, avg_fill_px=avg_fill_px, engine_order_id=order_id,
     ))
+
+    if result.filled_qty > 0:
+        # A strategy's own fill can reduce or close a position a manually-
+        # placed bracket is still watching -- same reasoning as
+        # routers/orders.py's own call to this, see brackets.py's
+        # docstring on why cancelling (not resizing) is the safe response.
+        cancel_brackets_closed_elsewhere(db, user_id=user_id, symbol=symbol, order_side=side)
 
 
 def run_strategies_once(db: Session, registry: MarketRegistry) -> None:

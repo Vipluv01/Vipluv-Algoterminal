@@ -3,7 +3,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.brackets import monitor_brackets
+from app.brackets import cancel_brackets_closed_elsewhere, monitor_brackets
 from app.db import Base
 from app.markets import MarketRegistry
 from app.models.trading import Bracket, BracketStatus, Mode, Order, OrderStatus, OrderType, Side
@@ -131,3 +131,86 @@ def test_cancelled_bracket_is_not_reevaluated(db, registry, user):
     monitor_brackets(db, registry)
 
     assert db.query(Order).count() == 1
+
+
+# --- cancel_brackets_closed_elsewhere: the "user or another strategy
+# manually closed a bracket-protected position" case ---
+
+def test_a_manual_sell_cancels_an_active_long_bracket_on_the_same_symbol(db, user):
+    entry = _entry_order(user.id, side=Side.buy)
+    db.add(entry)
+    db.flush()
+    b = Bracket(user_id=user.id, mode=Mode.paper, symbol="ICICIBANK", entry_side=Side.buy, qty=10,
+                stop_loss_px=1000.0, take_profit_px=None, entry_order_id=entry.id)
+    db.add(b)
+    db.commit()
+
+    # A manual (or another strategy's) sell fill on the same symbol --
+    # the position this bracket was protecting has been touched elsewhere.
+    cancel_brackets_closed_elsewhere(db, user_id=user.id, symbol="ICICIBANK", order_side="sell")
+    db.commit()
+
+    db.refresh(b)
+    assert b.status == BracketStatus.cancelled
+
+
+def test_a_manual_buy_cancels_an_active_short_bracket_but_not_a_long_one(db, user):
+    entry_short = _entry_order(user.id, side=Side.sell)
+    entry_long = _entry_order(user.id, side=Side.buy)
+    db.add_all([entry_short, entry_long])
+    db.flush()
+    short_bracket = Bracket(user_id=user.id, mode=Mode.paper, symbol="ICICIBANK", entry_side=Side.sell,
+                             qty=10, stop_loss_px=2000.0, entry_order_id=entry_short.id)
+    long_bracket = Bracket(user_id=user.id, mode=Mode.paper, symbol="ICICIBANK", entry_side=Side.buy,
+                            qty=10, stop_loss_px=100.0, entry_order_id=entry_long.id)
+    db.add_all([short_bracket, long_bracket])
+    db.commit()
+
+    # A buy fill covers a SHORT -- must cancel the short's bracket, but
+    # has nothing to do with the long's (a buy only ADDS to a long).
+    cancel_brackets_closed_elsewhere(db, user_id=user.id, symbol="ICICIBANK", order_side="buy")
+    db.commit()
+
+    db.refresh(short_bracket)
+    db.refresh(long_bracket)
+    assert short_bracket.status == BracketStatus.cancelled
+    assert long_bracket.status == BracketStatus.active
+
+
+def test_does_not_touch_brackets_on_a_different_symbol(db, user):
+    entry = _entry_order(user.id, symbol="HDFCBANK", side=Side.buy)
+    db.add(entry)
+    db.flush()
+    b = Bracket(user_id=user.id, mode=Mode.paper, symbol="HDFCBANK", entry_side=Side.buy, qty=10,
+                stop_loss_px=1000.0, entry_order_id=entry.id)
+    db.add(b)
+    db.commit()
+
+    cancel_brackets_closed_elsewhere(db, user_id=user.id, symbol="ICICIBANK", order_side="sell")
+    db.commit()
+
+    db.refresh(b)
+    assert b.status == BracketStatus.active
+
+
+def test_a_manual_close_followed_by_bracket_monitoring_does_not_double_close(db, registry, user):
+    """End-to-end: submit_order's own call to cancel_brackets_closed_elsewhere
+    (exercised via the real router in test_brackets_api.py) is mirrored
+    here at the integration level -- a bracket cancelled by a manual close
+    must not ALSO fire in monitor_brackets afterward."""
+    entry = _entry_order(user.id, side=Side.buy)
+    db.add(entry)
+    db.flush()
+    b = Bracket(user_id=user.id, mode=Mode.paper, symbol="ICICIBANK", entry_side=Side.buy, qty=10,
+                stop_loss_px=5000.0, entry_order_id=entry.id)  # would fire immediately if still active
+    db.add(b)
+    db.commit()
+
+    cancel_brackets_closed_elsewhere(db, user_id=user.id, symbol="ICICIBANK", order_side="sell")
+    db.commit()
+
+    monitor_brackets(db, registry)
+
+    db.refresh(b)
+    assert b.status == BracketStatus.cancelled  # not "triggered" -- monitor_brackets must have skipped it
+    assert b.closing_order_id is None

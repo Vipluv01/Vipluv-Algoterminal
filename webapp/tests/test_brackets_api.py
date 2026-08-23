@@ -59,3 +59,20 @@ def test_cancelling_an_already_cancelled_bracket_is_rejected(client):
 def test_cancelling_a_nonexistent_bracket_is_a_404(client):
     resp = client.delete("/orders/brackets/99999")
     assert resp.status_code == 404
+
+
+def test_a_second_manual_close_via_the_api_cancels_the_bracket(client):
+    """The real end-to-end path: submit with SL/TP, then manually sell the
+    position through the same /orders endpoint -- the bracket must be
+    cancelled automatically, not left dangling to fire later against a
+    position that's already gone."""
+    buy = client.post("/orders", json={
+        "symbol": "ICICIBANK", "side": "buy", "order_type": "market", "qty": 5, "stop_loss_px": 1000.0,
+    }).json()
+    assert len(client.get("/orders/brackets").json()) == 1
+
+    client.post("/orders", json={
+        "symbol": "ICICIBANK", "side": "sell", "order_type": "market", "qty": buy["filled_qty"],
+    })
+
+    assert client.get("/orders/brackets").json() == []

@@ -46,16 +46,13 @@ async def _tick_loop(registry: MarketRegistry) -> None:
         db = SessionLocal()
         try:
             run_strategies_once(db, registry)
-            # Deliberate scope boundary, not an oversight: a bracket
-            # doesn't currently know its underlying position could have
-            # changed size through some OTHER path (a strategy trading the
-            # same symbol, a second manual order) since it was attached --
-            # it just watches price and closes its own original qty. A
-            # position closed some other way while a bracket still
-            # references it would let that bracket fire against a
-            # smaller-or-zero position. Not exercised by anything built so
-            # far (strategies don't attach brackets, only manual orders
-            # do), but worth this note before that changes.
+            # A bracket-protected position closed some other way (a manual
+            # order, a different strategy on the same symbol) has its
+            # bracket cancelled at the moment that fill happens -- see
+            # app.brackets.cancel_brackets_closed_elsewhere, called from
+            # both routers/orders.py and strategy_runner.py, the two
+            # places a fill can occur. monitor_brackets only ever sees
+            # brackets that are still genuinely watching an intact position.
             monitor_brackets(db, registry)
         finally:
             db.close()

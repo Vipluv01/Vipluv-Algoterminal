@@ -46,6 +46,38 @@ def check_trigger(*, entry_side: str, price: float, stop_loss_px: float | None, 
     return None
 
 
+def cancel_brackets_closed_elsewhere(db: Session, *, user_id: int, symbol: str, order_side: str) -> None:
+    """Any active bracket on this symbol whose entry_side is the OPPOSITE
+    of a fill that just happened is watching a position that's now been
+    reduced (or closed, or flipped) by something other than the bracket
+    itself -- a manual order, or a different strategy trading the same
+    symbol. Left active, it would later fire against a position that's
+    smaller than what it was sized for, or gone entirely, and could open
+    an unwanted position in the other direction. Cancels rather than
+    resizes: correctly re-deriving the bracket's remaining protected qty
+    would need the same fill-by-fill walk app/accounting.py already does
+    for positions, and a stale bracket is a worse failure mode than one
+    that's gone -- a user or strategy that just traded manually is already
+    paying attention to that symbol.
+
+    Called from both routers/orders.py (manual orders) and
+    strategy_runner.py (strategy-generated orders) -- the two places a
+    fill can happen -- so this can't be skipped by using one path over
+    the other.
+    """
+    from app.models.trading import BracketStatus
+
+    opposite_side = Side.sell if order_side == "buy" else Side.buy
+    active = (
+        db.query(Bracket)
+        .filter(Bracket.user_id == user_id, Bracket.symbol == symbol,
+                Bracket.status == BracketStatus.active, Bracket.entry_side == opposite_side)
+        .all()
+    )
+    for b in active:
+        b.status = BracketStatus.cancelled
+
+
 def monitor_brackets(db: Session, registry: MarketRegistry) -> None:
     active = db.query(Bracket).filter(Bracket.status == BracketStatus.active, Bracket.mode == Mode.paper).all()
     for b in active:

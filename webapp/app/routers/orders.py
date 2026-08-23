@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
+from app.brackets import cancel_brackets_closed_elsewhere
 from app.db import get_db
 from app.markets import MarketRegistry
 from app.models.trading import Bracket, Mode, Order, OrderStatus, OrderType, Side
@@ -112,6 +113,9 @@ def submit_order(
     )
     db.add(order)
     db.flush()  # need order.id before a Bracket can reference it
+
+    if result.filled_qty > 0:
+        cancel_brackets_closed_elsewhere(db, user_id=user.id, symbol=body.symbol, order_side=body.side)
 
     # Attach a bracket only if there's a real filled quantity to protect --
     # an order that rested or was fully rejected has no position yet for a
