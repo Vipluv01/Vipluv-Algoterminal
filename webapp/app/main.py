@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.db import Base, SessionLocal, engine
 from app.markets import MarketRegistry
-from app.routers import account, dashboard, orders, strategies
+from app.routers import account, dashboard, market_ws, orders, strategies
 from app.strategy_runner import run_strategies_once
 
 MARKET_TICK_SECONDS = 1.0
@@ -47,6 +47,7 @@ async def _tick_loop(registry: MarketRegistry) -> None:
             run_strategies_once(db, registry)
         finally:
             db.close()
+        await market_ws.broadcast_ticks(registry)
         await asyncio.sleep(MARKET_TICK_SECONDS)
 
 
@@ -79,8 +80,15 @@ app.include_router(orders.router)
 app.include_router(account.router)
 app.include_router(strategies.router)
 app.include_router(dashboard.router)
+app.include_router(market_ws.router)
 
 
 @app.get("/healthz")
 def healthz():
     return {"ok": True}
+
+
+@app.get("/symbols")
+def list_symbols():
+    from app.markets import NAMED_INSTRUMENTS
+    return [{"symbol": s, "reference_price": p} for s, p in NAMED_INSTRUMENTS.items()]
