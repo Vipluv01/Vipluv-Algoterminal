@@ -35,6 +35,10 @@ export const api = {
     list: () => request("GET", "/orders"),
     submit: (body) => request("POST", "/orders", body),
     cancel: (id) => request("DELETE", `/orders/${id}`),
+    brackets: {
+      list: () => request("GET", "/orders/brackets"),
+      cancel: (id) => request("DELETE", `/orders/brackets/${id}`),
+    },
   },
 
   account: () => request("GET", "/account"),

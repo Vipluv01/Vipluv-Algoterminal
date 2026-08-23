@@ -8,6 +8,9 @@ export function OrderEntry({ symbol, price, onOrderPlaced }) {
   const [orderType, setOrderType] = React.useState("market");
   const [qty, setQty] = React.useState("10");
   const [px, setPx] = React.useState("");
+  const [showBracket, setShowBracket] = React.useState(false);
+  const [stopLoss, setStopLoss] = React.useState("");
+  const [takeProfit, setTakeProfit] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const pxTouchedRef = React.useRef(false);
   const toast = useToast();
@@ -22,15 +25,20 @@ export function OrderEntry({ symbol, price, onOrderPlaced }) {
     const qtyNum = parseInt(qty, 10);
     if (!qtyNum || qtyNum <= 0) return toast("Enter a valid quantity", "err");
     if (orderType === "limit" && (!px || Number(px) <= 0)) return toast("Enter a valid price", "err");
+    const slNum = showBracket && stopLoss ? Number(stopLoss) : null;
+    const tpNum = showBracket && takeProfit ? Number(takeProfit) : null;
+    if (showBracket && slNum === null && tpNum === null) return toast("Set a stop-loss and/or take-profit, or turn off Risk Management", "err");
 
     setSubmitting(true);
     try {
       const order = await api.orders.submit({
         symbol, side, order_type: orderType, qty: qtyNum,
         px: orderType === "limit" ? Number(px) : null,
+        stop_loss_px: slNum, take_profit_px: tpNum,
       });
       if (order.filled_qty > 0) {
-        toast(`${order.status === "filled" ? "Filled" : "Partially filled"} ${order.filled_qty}/${qtyNum} @ ₹${order.avg_fill_px?.toFixed(2)}`, "ok");
+        const bracketNote = (slNum || tpNum) ? " · bracket attached" : "";
+        toast(`${order.status === "filled" ? "Filled" : "Partially filled"} ${order.filled_qty}/${qtyNum} @ ₹${order.avg_fill_px?.toFixed(2)}${bracketNote}`, "ok");
       } else if (orderType === "market") {
         toast("No fill — no liquidity on the other side right now", "err");
       } else {
@@ -69,6 +77,25 @@ export function OrderEntry({ symbol, price, onOrderPlaced }) {
                  onFocus=${() => { pxTouchedRef.current = true; }}
                  onInput=${(e) => setPx(e.target.value)} />
         </div>
+      `}
+
+      <div class="field" style=${{ marginTop: "4px" }}>
+        <label style=${{ display: "flex", alignItems: "center", gap: "7px", cursor: "pointer", textTransform: "none", letterSpacing: "normal", fontSize: "12px", color: "var(--text-dim)" }}>
+          <input type="checkbox" checked=${showBracket} onChange=${(e) => setShowBracket(e.target.checked)} />
+          Risk Management (Stop Loss / Take Profit)
+        </label>
+      </div>
+      ${showBracket && html`
+        <${React.Fragment}>
+          <div class="field">
+            <label>Stop Loss (₹)</label>
+            <input class="input" type="number" min="0" step="0.05" placeholder="optional" value=${stopLoss} onInput=${(e) => setStopLoss(e.target.value)} />
+          </div>
+          <div class="field">
+            <label>Take Profit (₹)</label>
+            <input class="input" type="number" min="0" step="0.05" placeholder="optional" value=${takeProfit} onInput=${(e) => setTakeProfit(e.target.value)} />
+          </div>
+        <//>
       `}
 
       <button class=${`btn btn-block ${side === "buy" ? "btn-buy" : "btn-sell"}`} disabled=${submitting} onClick=${submit}>

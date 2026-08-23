@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user
 from app.db import get_db
 from app.markets import MarketRegistry
-from app.models.trading import Mode, Order, OrderStatus, OrderType, Side
+from app.models.trading import Bracket, Mode, Order, OrderStatus, OrderType, Side
 from app.models.user import User
 from app.orders_limits import MAX_ORDER_QTY
 
@@ -34,6 +34,15 @@ class SubmitOrderRequest(BaseModel):
     px: float | None = None
     mode: Literal["paper", "live"] = "paper"
     strategy_key: str | None = None
+    # Optional bracket, attached only if this entry order actually fills
+    # (any amount -- see submit_order below for the partial-fill case).
+    # A long's stop_loss_px must be below px/current price and its
+    # take_profit_px above it; validating that here would need the fill
+    # price this endpoint doesn't have until AFTER submission, so it's
+    # deferred to app.brackets.check_trigger simply never firing for an
+    # inverted threshold rather than rejected up front.
+    stop_loss_px: float | None = None
+    take_profit_px: float | None = None
 
 
 class OrderOut(BaseModel):
@@ -102,6 +111,21 @@ def submit_order(
         engine_order_id=order_id,
     )
     db.add(order)
+    db.flush()  # need order.id before a Bracket can reference it
+
+    # Attach a bracket only if there's a real filled quantity to protect --
+    # an order that rested or was fully rejected has no position yet for a
+    # stop-loss/take-profit to watch. Sized to the FILLED quantity, not the
+    # requested one: a partial fill means only that much is actually at
+    # risk, and closing more than that on trigger would over-close a
+    # position that was never fully opened.
+    if result.filled_qty > 0 and (body.stop_loss_px is not None or body.take_profit_px is not None):
+        db.add(Bracket(
+            user_id=user.id, mode=Mode.paper, symbol=body.symbol, entry_side=Side(body.side),
+            qty=result.filled_qty, stop_loss_px=body.stop_loss_px, take_profit_px=body.take_profit_px,
+            entry_order_id=order.id,
+        ))
+
     db.commit()
     db.refresh(order)
     return order
@@ -135,3 +159,39 @@ def cancel_order(
 @router.get("", response_model=list[OrderOut])
 def list_orders(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return db.query(Order).filter(Order.user_id == user.id).order_by(Order.created_at.desc()).all()
+
+
+class BracketOut(BaseModel):
+    id: int
+    symbol: str
+    entry_side: str
+    qty: int
+    stop_loss_px: float | None
+    take_profit_px: float | None
+    status: str
+
+    model_config = {"from_attributes": True}
+
+
+@router.get("/brackets", response_model=list[BracketOut])
+def list_brackets(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.models.trading import BracketStatus
+    return (
+        db.query(Bracket)
+        .filter(Bracket.user_id == user.id, Bracket.status == BracketStatus.active)
+        .order_by(Bracket.created_at.desc())
+        .all()
+    )
+
+
+@router.delete("/brackets/{bracket_id}")
+def cancel_bracket(bracket_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.models.trading import BracketStatus
+    bracket = db.get(Bracket, bracket_id)
+    if bracket is None or bracket.user_id != user.id:
+        raise HTTPException(status_code=404, detail="bracket not found")
+    if bracket.status != BracketStatus.active:
+        raise HTTPException(status_code=400, detail=f"cannot cancel a bracket in status {bracket.status}")
+    bracket.status = BracketStatus.cancelled
+    db.commit()
+    return {"ok": True, "bracket_id": bracket_id}

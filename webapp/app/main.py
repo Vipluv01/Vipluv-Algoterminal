@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.brackets import monitor_brackets
 from app.db import Base, SessionLocal, engine
 from app.markets import MarketRegistry
 from app.routers import account, dashboard, market_ws, orders, risk, strategies
@@ -45,6 +46,17 @@ async def _tick_loop(registry: MarketRegistry) -> None:
         db = SessionLocal()
         try:
             run_strategies_once(db, registry)
+            # Deliberate scope boundary, not an oversight: a bracket
+            # doesn't currently know its underlying position could have
+            # changed size through some OTHER path (a strategy trading the
+            # same symbol, a second manual order) since it was attached --
+            # it just watches price and closes its own original qty. A
+            # position closed some other way while a bracket still
+            # references it would let that bracket fire against a
+            # smaller-or-zero position. Not exercised by anything built so
+            # far (strategies don't attach brackets, only manual orders
+            # do), but worth this note before that changes.
+            monitor_brackets(db, registry)
         finally:
             db.close()
         await market_ws.broadcast_ticks(registry)

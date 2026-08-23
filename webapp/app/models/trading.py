@@ -117,6 +117,48 @@ class Order(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
 
+class BracketStatus(str, PyEnum):
+    active = "active"
+    triggered = "triggered"
+    cancelled = "cancelled"
+
+
+class Bracket(Base):
+    """An attached stop-loss and/or take-profit watching one filled entry
+    order -- the "Risk Management" fields on the reviewed video's Manual
+    Trade screen. OCO (one-cancels-other) by construction: there is exactly
+    one row per entry, so whichever threshold the tick loop's monitor hits
+    first sets status=triggered and closes the position, which removes it
+    from consideration for the other threshold on the very next tick --
+    no separate cancellation step needed, unlike a system that models SL
+    and TP as two independent linked orders.
+
+    entry_side is the position's OWN side (buy = long, sell = short) -- the
+    monitor needs it to know which DIRECTION each threshold triggers in:
+    a long's stop-loss fires on price falling to/through it, a short's
+    fires on price rising to/through it. Storing this explicitly, rather
+    than re-deriving "am I long or short" from Order history at check time,
+    keeps the tick-loop hot path (runs every second, over every active
+    bracket) a single indexed row read instead of a full order-history walk
+    per bracket per tick.
+    """
+
+    __tablename__ = "brackets"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    mode: Mapped[Mode] = mapped_column(Enum(Mode))
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    entry_side: Mapped[Side] = mapped_column(Enum(Side))
+    qty: Mapped[int] = mapped_column(Integer)
+    stop_loss_px: Mapped[float | None] = mapped_column(Float, nullable=True)
+    take_profit_px: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[BracketStatus] = mapped_column(Enum(BracketStatus), default=BracketStatus.active, index=True)
+    entry_order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"))
+    closing_order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class JournalNote(Base):
     """Free-text trade journal entries, the "Notes" tab in the Dashboard
     view (see the plan / reviewed screenshots). Deliberately just a
