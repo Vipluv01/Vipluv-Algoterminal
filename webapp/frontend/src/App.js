@@ -1,0 +1,59 @@
+import React from "react";
+import { html } from "./html.js";
+import { Terminal } from "./pages/Terminal.js";
+import { Dashboard } from "./pages/Dashboard.js";
+import { Strategies } from "./pages/Strategies.js";
+import { Landing } from "./pages/Landing.js";
+
+const ROUTES = {
+  "": Landing,
+  "#/": Landing,
+  "#/terminal": Terminal,
+  "#/dashboard": Dashboard,
+  "#/strategies": Strategies,
+};
+
+const NAV_ITEMS = [
+  { hash: "#/terminal", label: "Terminal" },
+  { hash: "#/dashboard", label: "Dashboard" },
+  { hash: "#/strategies", label: "Strategies" },
+];
+
+function useHashRoute() {
+  const [hash, setHash] = React.useState(window.location.hash || "");
+  React.useEffect(() => {
+    const onChange = () => setHash(window.location.hash || "");
+    window.addEventListener("hashchange", onChange);
+    return () => window.removeEventListener("hashchange", onChange);
+  }, []);
+  return hash;
+}
+
+export function App() {
+  const hash = useHashRoute();
+  const Page = ROUTES[hash] || Terminal;
+  const isLanding = Page === Landing;
+
+  return html`
+    <${React.Fragment}>
+      ${!isLanding && html`
+        <nav class="topnav">
+          <a href="#/" class="brand" style=${{ textDecoration: "none" }}>
+            <span class="brand-mark">A</span>
+            <span>algoterminal</span>
+          </a>
+          <div class="nav-links">
+            ${NAV_ITEMS.map((item) => html`
+              <a key=${item.hash} href=${item.hash}
+                 class=${`nav-link ${hash === item.hash ? "active" : ""}`}>
+                ${item.label}
+              </a>
+            `)}
+          </div>
+          <span class="badge badge-off">PAPER MODE</span>
+        </nav>
+      `}
+      <${Page} />
+    <//>
+  `;
+}
