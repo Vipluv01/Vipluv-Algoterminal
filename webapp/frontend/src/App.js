@@ -1,6 +1,7 @@
 import React from "react";
 import { html } from "./html.js";
 import { Terminal } from "./pages/Terminal.js";
+import { Charts } from "./pages/Charts.js";
 import { Dashboard } from "./pages/Dashboard.js";
 import { Strategies } from "./pages/Strategies.js";
 import { Landing } from "./pages/Landing.js";
@@ -9,12 +10,14 @@ const ROUTES = {
   "": Landing,
   "#/": Landing,
   "#/terminal": Terminal,
+  "#/charts": Charts,
   "#/dashboard": Dashboard,
   "#/strategies": Strategies,
 };
 
 const NAV_ITEMS = [
   { hash: "#/terminal", label: "Terminal" },
+  { hash: "#/charts", label: "Charts" },
   { hash: "#/dashboard", label: "Dashboard" },
   { hash: "#/strategies", label: "Strategies" },
 ];
