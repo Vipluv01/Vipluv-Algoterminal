@@ -1,9 +1,9 @@
 """algoterminal's FastAPI app.
 
 Phase 1 scope (see /Users/vipluv/.claude/plans/eager-wiggling-key.md):
-paper-mode order execution, positions/P&L, market data -- no auth (see
-app/auth.py's placeholder), no live broker, no strategy auto-execution
-loop yet. Those are later routers, added the same way orders/account were.
+paper-mode order execution, positions/P&L, market data, strategy
+auto-execution -- no auth (see app/auth.py's placeholder), no live broker
+yet. Those are later phases.
 """
 
 from __future__ import annotations
@@ -15,9 +15,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.db import Base, engine
+from app.db import Base, SessionLocal, engine
 from app.markets import MarketRegistry
-from app.routers import account, orders
+from app.routers import account, dashboard, orders, strategies
+from app.strategy_runner import run_strategies_once
 
 MARKET_TICK_SECONDS = 1.0
 
@@ -38,6 +39,14 @@ DISABLE_MARKET_TICK = os.environ.get("DISABLE_MARKET_TICK") == "1"
 async def _tick_loop(registry: MarketRegistry) -> None:
     while True:
         registry.step_all()
+        # A fresh session per tick, not the per-request get_db() dependency
+        # -- this runs outside any HTTP request, so there is no request
+        # scope to borrow a session from.
+        db = SessionLocal()
+        try:
+            run_strategies_once(db, registry)
+        finally:
+            db.close()
         await asyncio.sleep(MARKET_TICK_SECONDS)
 
 
@@ -68,6 +77,8 @@ app.add_middleware(
 
 app.include_router(orders.router)
 app.include_router(account.router)
+app.include_router(strategies.router)
+app.include_router(dashboard.router)
 
 
 @app.get("/healthz")

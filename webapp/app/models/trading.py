@@ -76,6 +76,11 @@ class StrategyAllocation(Base):
     mode: Mapped[Mode] = mapped_column(Enum(Mode))
     enabled: Mapped[bool] = mapped_column(default=False)
     weight: Mapped[float] = mapped_column(Float, default=0.0)  # 0..1, from the portfolio optimizer or set manually
+    # Which named instrument (app/markets.py) this allocation trades.
+    # Ignored for pairs_cointegration, which always trades the one pair
+    # it was validated against (ICICIBANK/HDFCBANK) -- not user-configurable,
+    # since a different pair has no cointegration evidence behind it.
+    symbol: Mapped[str | None] = mapped_column(String(32), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
     )
@@ -109,6 +114,21 @@ class Order(Base):
     # this field being non-null is the actual proof a real trade happened).
     broker_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+
+
+class JournalNote(Base):
+    """Free-text trade journal entries, the "Notes" tab in the Dashboard
+    view (see the plan / reviewed screenshots). Deliberately just a
+    timestamped blob of text -- not linked to a specific Order, matching
+    what the reviewed screenshots showed (notes like "Closed all SOL
+    before the weekend" that summarize a session, not a single trade)."""
+
+    __tablename__ = "journal_notes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    text: Mapped[str] = mapped_column(String(2000))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
 

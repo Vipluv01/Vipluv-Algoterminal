@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.accounting import compute_account
+from app.accounting import compute_account, compute_realizations
 from app.models.trading import Mode, Order, OrderStatus, OrderType, Side
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -120,3 +120,36 @@ def test_processes_fills_in_chronological_order_regardless_of_input_order():
     acc = compute_account(orders, current_prices={"TCS": 4300.0}, starting_cash=1_000_000.0)
     assert "TCS" not in acc.positions
     assert acc.total_realized_pnl == pytest.approx(10 * (4300.0 - 4000.0))
+
+
+def test_compute_realizations_is_empty_when_nothing_has_closed():
+    orders = [_order("RELIANCE", Side.buy, 10, 2900.0)]
+    assert compute_realizations(orders) == []
+
+
+def test_compute_realizations_records_one_event_per_closing_fill():
+    orders = [
+        _order("TCS", Side.buy, 10, 4000.0, minutes_after_t0=0),
+        _order("TCS", Side.sell, 4, 4300.0, minutes_after_t0=1),   # win
+        _order("TCS", Side.buy, 4, 4000.0, minutes_after_t0=2),    # re-adds, no realization
+        _order("TCS", Side.sell, 4, 3900.0, minutes_after_t0=3),   # loss
+    ]
+    events = compute_realizations(orders)
+    assert len(events) == 2
+    assert events[0].amount == pytest.approx(4 * (4300.0 - 4000.0))
+    assert events[1].amount == pytest.approx(4 * (3900.0 - 4000.0))
+    assert all(e.symbol == "TCS" for e in events)
+
+
+def test_compute_realizations_matches_compute_accounts_total(monkeypatch):
+    """The two views must agree -- they now share the same underlying walk,
+    so this is really a guard against that refactor ever drifting."""
+    orders = [
+        _order("RELIANCE", Side.buy, 10, 2900.0, minutes_after_t0=0),
+        _order("RELIANCE", Side.sell, 6, 3000.0, minutes_after_t0=1),
+        _order("TCS", Side.sell, 5, 4000.0, minutes_after_t0=2),
+        _order("TCS", Side.buy, 5, 3900.0, minutes_after_t0=3),
+    ]
+    acc = compute_account(orders, current_prices={"RELIANCE": 3000.0, "TCS": 3900.0}, starting_cash=1_000_000.0)
+    events = compute_realizations(orders, starting_cash=1_000_000.0)
+    assert sum(e.amount for e in events) == pytest.approx(acc.total_realized_pnl)
