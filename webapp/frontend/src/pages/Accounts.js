@@ -16,10 +16,10 @@ export function Accounts() {
         <div class="panel panel-pad">
           <div class="panel-title">Trading Mode</div>
           <div style=${{ display: "flex", gap: "10px" }}>
-            <div class="chip active" style=${{ flex: 1, textAlign: "center", cursor: "default" }}>
+            <div class="chip active" style=${{ flex: 1, minWidth: 0, whiteSpace: "normal", textAlign: "center", cursor: "default" }}>
               <span class="badge badge-live" style=${{ marginRight: "8px" }}>●</span>Paper
             </div>
-            <div class="chip" style=${{ flex: 1, textAlign: "center", cursor: "not-allowed", opacity: 0.5 }} title="Requires a connected broker">
+            <div class="chip" style=${{ flex: 1, minWidth: 0, whiteSpace: "normal", textAlign: "center", cursor: "not-allowed", opacity: 0.5 }} title="Requires a connected broker">
               Live (locked)
             </div>
           </div>
@@ -49,7 +49,7 @@ export function Accounts() {
           ${!account
             ? html`<div class="skeleton" style=${{ height: "60px" }} />`
             : html`
-              <div style=${{ display: "flex", gap: "32px" }}>
+              <div style=${{ display: "flex", flexWrap: "wrap", gap: "24px 32px" }}>
                 <div>
                   <div class="stat-label">Cash</div>
                   <div class="mono" style=${{ fontWeight: 600, fontSize: "16px" }}>${fmtMoney(account.cash)}</div>
