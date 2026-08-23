@@ -51,6 +51,12 @@ export function App() {
   const hash = useHashRoute();
   const Page = ROUTES[hash] || Terminal;
   const isLanding = Page === Landing;
+  const [mobileNavOpen, setMobileNavOpen] = React.useState(false);
+
+  // The dropdown must close itself on navigation -- without this, tapping
+  // a link on mobile would swap the page underneath while the menu stayed
+  // open on top of it, since a hash change doesn't unmount this component.
+  React.useEffect(() => { setMobileNavOpen(false); }, [hash]);
 
   return html`
     <${React.Fragment}>
@@ -60,7 +66,7 @@ export function App() {
             <span class="brand-mark">A</span>
             <span>algoterminal</span>
           </a>
-          <div class="nav-links">
+          <div class=${`nav-links ${mobileNavOpen ? "open" : ""}`}>
             ${NAV_ITEMS.map((item) => html`
               <a key=${item.hash} href=${item.hash}
                  class=${`nav-link ${hash === item.hash ? "active" : ""}`}>
@@ -69,6 +75,9 @@ export function App() {
             `)}
           </div>
           <span class="badge badge-off">PAPER MODE</span>
+          <button class="nav-toggle" aria-label="Menu" onClick=${() => setMobileNavOpen((v) => !v)}>
+            ${mobileNavOpen ? "✕" : "☰"}
+          </button>
         </nav>
       `}
       <${Page} />
