@@ -336,8 +336,15 @@ a:hover { text-decoration: underline; }
 
 @media (max-width: 900px) {
   .landing-title { font-size: 30px; }
-  .landing-stats { grid-template-columns: repeat(2, 1fr); }
-  .landing-features { grid-template-columns: 1fr; }
+  /* minmax(0, 1fr), not bare 1fr: a grid track's default min-width is
+     auto (don't shrink below content), not 0 -- a bare `1fr` still lets
+     a wide child (long text, a fixed-size chart) force the WHOLE grid,
+     and everything under it, wider than the viewport. Confirmed live:
+     this exact gap on .terminal-grid measured a real 634px-wide grid
+     track inside a 343px-wide mobile page. Applied uniformly below
+     since every mobile single/double-column collapse has the same risk. */
+  .landing-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .landing-features { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 900px) {
@@ -360,11 +367,11 @@ a:hover { text-decoration: underline; }
   }
   .nav-links.open { display: flex; }
   .nav-link { padding: 11px 13px; }
-  .terminal-grid { grid-template-columns: 1fr; }
-  .dash-grid { grid-template-columns: 1fr; }
-  .dash-stats { grid-template-columns: repeat(2, 1fr) !important; }
-  .strategies-grid { grid-template-columns: 1fr; }
-  .charts-grid { grid-template-columns: 1fr; }
-  .accounts-grid { grid-template-columns: 1fr; }
-  .trade-grid { grid-template-columns: 1fr; }
+  .terminal-grid { grid-template-columns: minmax(0, 1fr); }
+  .dash-grid { grid-template-columns: minmax(0, 1fr); }
+  .dash-stats { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  .strategies-grid { grid-template-columns: minmax(0, 1fr); }
+  .charts-grid { grid-template-columns: minmax(0, 1fr); }
+  .accounts-grid { grid-template-columns: minmax(0, 1fr); }
+  .trade-grid { grid-template-columns: minmax(0, 1fr); }
 }
