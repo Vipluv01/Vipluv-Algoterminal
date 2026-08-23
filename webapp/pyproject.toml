@@ -1,0 +1,32 @@
+[project]
+name = "bourse-webapp"
+version = "0.1.0"
+description = "algoterminal -- multi-strategy paper/live trading platform, backed by bourse's Go matching engine for paper mode."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "sqlalchemy",
+    "authlib",
+    "httpx",
+    "python-dotenv",
+    "itsdangerous",
+    "cryptography",
+    "numpy",
+    "scipy",
+    "statsmodels",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
