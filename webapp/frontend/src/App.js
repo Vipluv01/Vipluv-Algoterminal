@@ -6,6 +6,7 @@ import { Dashboard } from "./pages/Dashboard.js";
 import { Strategies } from "./pages/Strategies.js";
 import { Risk } from "./pages/Risk.js";
 import { Pairs } from "./pages/Pairs.js";
+import { Optimizer } from "./pages/Optimizer.js";
 import { Accounts } from "./pages/Accounts.js";
 import { Landing } from "./pages/Landing.js";
 
@@ -17,6 +18,7 @@ const ROUTES = {
   "#/dashboard": Dashboard,
   "#/strategies": Strategies,
   "#/pairs": Pairs,
+  "#/optimizer": Optimizer,
   "#/risk": Risk,
   "#/accounts": Accounts,
 };
@@ -27,6 +29,7 @@ const NAV_ITEMS = [
   { hash: "#/dashboard", label: "Dashboard" },
   { hash: "#/strategies", label: "Strategies" },
   { hash: "#/pairs", label: "Pairs" },
+  { hash: "#/optimizer", label: "Optimizer" },
   { hash: "#/risk", label: "Risk" },
   { hash: "#/accounts", label: "Accounts" },
 ];

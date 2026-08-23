@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.brackets import monitor_brackets
 from app.db import Base, SessionLocal, engine
 from app.markets import MarketRegistry
-from app.routers import account, dashboard, market_ws, orders, pairs, risk, strategies
+from app.routers import account, dashboard, market_ws, optimizer, orders, pairs, risk, strategies
 from app.strategy_runner import run_strategies_once
 
 MARKET_TICK_SECONDS = 1.0
@@ -92,6 +92,7 @@ app.include_router(dashboard.router)
 app.include_router(market_ws.router)
 app.include_router(risk.router)
 app.include_router(pairs.router)
+app.include_router(optimizer.router)
 
 
 @app.get("/healthz")
