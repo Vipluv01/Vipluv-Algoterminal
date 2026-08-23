@@ -4,6 +4,8 @@ This is the same "drive it for real, not just unit-test the pieces"
 discipline used to catch real bugs earlier this session (the WebSocket
 upgrade / static-file collision, the NaN-order-type wording)."""
 
+import pytest
+
 
 def test_healthz(client):
     resp = client.get("/healthz")
@@ -101,3 +103,24 @@ def test_account_with_no_orders_is_just_starting_cash(client):
     assert account["positions"] == []
     assert account["cash"] == 100_000.0
     assert account["total_value"] == 100_000.0
+
+
+def test_equity_curve_is_empty_with_no_orders(client):
+    assert client.get("/account/equity-curve").json() == []
+
+
+def test_equity_curve_has_a_point_per_fill_and_ends_at_realized_equity(client):
+    buy = client.post("/orders", json={
+        "symbol": "ICICIBANK", "side": "buy", "order_type": "market", "qty": 5,
+    }).json()
+    sell = client.post("/orders", json={
+        "symbol": "ICICIBANK", "side": "sell", "order_type": "market", "qty": buy["filled_qty"],
+    }).json()
+
+    curve = client.get("/account/equity-curve").json()
+    assert len(curve) == 2
+    assert curve[0]["equity"] == pytest.approx(100_000.0), "the opening fill doesn't realize anything yet"
+
+    account = client.get("/account").json()
+    assert curve[-1]["equity"] == pytest.approx(100_000.0 + account["total_realized_pnl"])
+    assert sell["filled_qty"] >= 0  # the closing order may rest partially -- not the point of this test

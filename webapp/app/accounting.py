@@ -49,6 +49,22 @@ class TradeRealization:
     created_at: object  # datetime, left untyped here to avoid importing datetime just for a hint
 
 
+@dataclass(frozen=True)
+class EquityPoint:
+    """starting_cash + cumulative realized P&L as of this fill --
+    deliberately NOT cash + live mark-to-market (that would need a real
+    price at every past moment this curve passes through, which nothing
+    records). This is "closed-book" equity: it moves only when a trade
+    actually realizes P&L, so it's real and reconstructible from Order
+    history alone, at the cost of not reflecting an open position's
+    paper gain/loss between fills -- an honest tradeoff, not an
+    approximation dressed up as a live equity curve."""
+
+    order_id: int
+    created_at: object
+    equity: float
+
+
 @dataclass
 class _WalkResult:
     cash: float
@@ -56,6 +72,7 @@ class _WalkResult:
     avg_px: dict[str, float] = field(default_factory=dict)
     realized_by_symbol: dict[str, float] = field(default_factory=dict)
     realizations: list[TradeRealization] = field(default_factory=list)
+    equity_points: list[EquityPoint] = field(default_factory=list)
 
 
 def _filled_orders_only(orders: list[Order]) -> list[Order]:
@@ -72,6 +89,7 @@ def _walk_fills(orders: list[Order], starting_cash: float) -> _WalkResult:
     than risking two accounting implementations drifting apart.
     """
     result = _WalkResult(cash=starting_cash)
+    running_realized = 0.0
 
     for o in sorted(_filled_orders_only(orders), key=lambda o: o.created_at):
         sym = o.symbol
@@ -100,6 +118,7 @@ def _walk_fills(orders: list[Order], starting_cash: float) -> _WalkResult:
             direction = 1 if prev_qty > 0 else -1
             amount = closing_qty * direction * (fill_px - prev_avg)
             result.realized_by_symbol[sym] += amount
+            running_realized += amount
             result.realizations.append(TradeRealization(
                 order_id=o.id, symbol=sym, strategy_key=o.strategy_key,
                 amount=amount, created_at=o.created_at,
@@ -113,6 +132,14 @@ def _walk_fills(orders: list[Order], starting_cash: float) -> _WalkResult:
             # else: partial reduction, average entry price is unchanged.
 
         result.qty[sym] = new_qty
+        # A point after EVERY fill, not just realizing ones -- an opening
+        # fill leaves equity unchanged (running_realized doesn't move),
+        # which is correct: the curve should read flat while a position
+        # is simply being held/built, not silently skip that stretch of
+        # real trading activity.
+        result.equity_points.append(EquityPoint(
+            order_id=o.id, created_at=o.created_at, equity=starting_cash + running_realized,
+        ))
 
     return result
 
@@ -149,3 +176,10 @@ def compute_realizations(orders: list[Order], starting_cash: float = STARTING_PA
     the raw material for win rate, profit factor, and avg win/loss
     (app/routers/dashboard.py)."""
     return _walk_fills(orders, starting_cash).realizations
+
+
+def compute_equity_curve(orders: list[Order], starting_cash: float = STARTING_PAPER_CASH_DEFAULT) -> list[EquityPoint]:
+    """One point per fill, chronological -- see EquityPoint's own
+    docstring for exactly what this does and doesn't represent (realized
+    equity, not live mark-to-market)."""
+    return _walk_fills(orders, starting_cash).equity_points

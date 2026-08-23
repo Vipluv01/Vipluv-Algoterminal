@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.accounting import compute_account, compute_realizations
+from app.accounting import compute_account, compute_equity_curve, compute_realizations
 from app.models.trading import Mode, Order, OrderStatus, OrderType, Side
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -139,6 +139,55 @@ def test_compute_realizations_records_one_event_per_closing_fill():
     assert events[0].amount == pytest.approx(4 * (4300.0 - 4000.0))
     assert events[1].amount == pytest.approx(4 * (3900.0 - 4000.0))
     assert all(e.symbol == "TCS" for e in events)
+
+
+def test_compute_equity_curve_is_empty_with_no_orders():
+    assert compute_equity_curve([]) == []
+
+
+def test_compute_equity_curve_has_one_point_per_fill_including_non_realizing_ones():
+    orders = [
+        _order("TCS", Side.buy, 10, 4000.0, minutes_after_t0=0),   # opens -- no realization yet
+        _order("TCS", Side.sell, 4, 4300.0, minutes_after_t0=1),   # realizes a win
+    ]
+    curve = compute_equity_curve(orders, starting_cash=100_000.0)
+    assert len(curve) == 2, "a point per FILL, not just per realizing fill -- the curve must show flat stretches while a position is only being built, not skip them"
+    assert curve[0].equity == pytest.approx(100_000.0), "opening a position doesn't change realized equity yet"
+    assert curve[1].equity == pytest.approx(100_000.0 + 4 * (4300.0 - 4000.0))
+
+
+def test_compute_equity_curve_is_chronological_regardless_of_input_order():
+    orders = [
+        _order("TCS", Side.sell, 10, 4300.0, minutes_after_t0=1),
+        _order("TCS", Side.buy, 10, 4000.0, minutes_after_t0=0),
+    ]
+    curve = compute_equity_curve(orders, starting_cash=100_000.0)
+    assert curve[0].created_at < curve[1].created_at
+    assert curve[-1].equity == pytest.approx(100_000.0 + 10 * (4300.0 - 4000.0))
+
+
+def test_compute_equity_curve_matches_total_realized_pnl_at_the_final_point():
+    """The whole point of this curve: its LAST value must equal
+    starting_cash + total realized P&L, exactly what compute_account
+    reports separately -- two views of the same walk that must agree,
+    same discipline as the existing compute_realizations cross-check."""
+    orders = [
+        _order("RELIANCE", Side.buy, 10, 2900.0, minutes_after_t0=0),
+        _order("RELIANCE", Side.sell, 6, 3000.0, minutes_after_t0=1),
+        _order("TCS", Side.sell, 5, 4000.0, minutes_after_t0=2),
+        _order("TCS", Side.buy, 5, 3900.0, minutes_after_t0=3),
+    ]
+    acc = compute_account(orders, current_prices={"RELIANCE": 3000.0, "TCS": 3900.0}, starting_cash=1_000_000.0)
+    curve = compute_equity_curve(orders, starting_cash=1_000_000.0)
+    assert curve[-1].equity == pytest.approx(1_000_000.0 + acc.total_realized_pnl)
+
+
+def test_compute_equity_curve_ignores_pending_and_cancelled_orders():
+    orders = [
+        _order("TCS", Side.buy, 10, 4000.0, status=OrderStatus.pending_confirmation),
+        _order("TCS", Side.buy, 5, 4000.0, status=OrderStatus.cancelled),
+    ]
+    assert compute_equity_curve(orders, starting_cash=100_000.0) == []
 
 
 def test_compute_realizations_matches_compute_accounts_total(monkeypatch):

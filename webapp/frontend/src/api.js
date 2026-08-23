@@ -54,6 +54,7 @@ export const api = {
   },
 
   account: () => request("GET", "/account"),
+  equityCurve: () => request("GET", "/account/equity-curve"),
 
   risk: () => request("GET", "/risk"),
 

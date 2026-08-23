@@ -2,6 +2,7 @@ import React from "react";
 import { html } from "../html.js";
 import { api } from "../api.js";
 import { fmtMoney, fmtNum, pnlClass } from "../format.js";
+import { LineChart } from "./LineChart.js";
 
 const TABS = ["Portfolio", "Open Orders", "Brackets", "All Orders"];
 
@@ -10,14 +11,16 @@ export function AccountPanel({ refreshKey }) {
   const [account, setAccount] = React.useState(null);
   const [orders, setOrders] = React.useState([]);
   const [brackets, setBrackets] = React.useState([]);
+  const [equityCurve, setEquityCurve] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
 
   const load = React.useCallback(async () => {
     try {
-      const [acc, ords, brs] = await Promise.all([api.account(), api.orders.list(), api.orders.brackets.list()]);
+      const [acc, ords, brs, curve] = await Promise.all([api.account(), api.orders.list(), api.orders.brackets.list(), api.equityCurve()]);
       setAccount(acc);
       setOrders(ords);
       setBrackets(brs);
+      setEquityCurve(curve);
     } finally {
       setLoading(false);
     }
@@ -65,6 +68,16 @@ export function AccountPanel({ refreshKey }) {
               <div class=${`mono ${pnlClass(account?.total_unrealized_pnl)}`} style=${{ fontWeight: 600 }}>${fmtMoney(account?.total_unrealized_pnl)}</div>
             </div>
           </div>
+
+          ${equityCurve.length >= 2 && html`
+            <div style=${{ marginBottom: "16px" }}>
+              <div class="stat-label" style=${{ marginBottom: "6px" }}>Equity Curve (realized)</div>
+              <${LineChart} series=${equityCurve.map((p) => p.equity)}
+                color=${equityCurve[equityCurve.length - 1].equity >= equityCurve[0].equity ? "var(--bid-bright)" : "var(--ask-bright)"}
+                height=${100} />
+            </div>
+          `}
+
           ${!account?.positions?.length
             ? html`<div style=${{ color: "var(--text-faint)", padding: "12px 0" }}>No open positions</div>`
             : html`

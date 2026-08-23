@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.accounting import compute_account
+from app.accounting import compute_account, compute_equity_curve
 from app.auth import get_current_user
 from app.db import get_db
 from app.markets import MarketRegistry
@@ -54,3 +54,17 @@ def get_account(
             for p in snapshot.positions.values()
         ],
     )
+
+
+class EquityPointOut(BaseModel):
+    order_id: int
+    created_at: object
+    equity: float
+
+    model_config = {"from_attributes": True}
+
+
+@router.get("/equity-curve", response_model=list[EquityPointOut])
+def get_equity_curve(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    orders = db.query(Order).filter(Order.user_id == user.id, Order.mode == Mode.paper).all()
+    return compute_equity_curve(orders)
