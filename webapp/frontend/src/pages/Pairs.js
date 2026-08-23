@@ -169,7 +169,7 @@ function AnalyticsTab({ data, onForceClose, closing }) {
           ? html`<div style=${{ color: "var(--text-faint)", padding: "8px 0" }}>No open spread position</div>`
           : html`
             <${React.Fragment}>
-              <div style=${{ display: "flex", gap: "24px", marginBottom: "14px" }}>
+              <div style=${{ display: "flex", flexWrap: "wrap", gap: "16px 24px", marginBottom: "14px" }}>
                 <div>
                   <div class="stat-label">Entry Z-Score</div>
                   <div class="mono" style=${{ fontWeight: 600 }}>${data.entry_zscore !== null ? data.entry_zscore.toFixed(3) : "—"}</div>
