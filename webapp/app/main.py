@@ -11,9 +11,11 @@ from __future__ import annotations
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.brackets import monitor_brackets
 from app.db import Base, SessionLocal, engine
@@ -104,3 +106,16 @@ def healthz():
 def list_symbols():
     from app.markets import NAMED_INSTRUMENTS
     return [{"symbol": s, "reference_price": p} for s, p in NAMED_INSTRUMENTS.items()]
+
+
+# Serves the frontend on the SAME port/process as the API -- required for
+# hosts (Render's free tier included) that only route one public port to a
+# service, the same constraint sim/demo/Dockerfile's serve_static_or_upgrade
+# already solves for the old demo. Mounted last, deliberately: Starlette
+# matches routes in registration order, and a mount at "/" would otherwise
+# shadow every API route registered after it. The frontend uses hash-based
+# routing (#/terminal etc., never sent to the server), so every page loads
+# via a plain GET "/" -- html=True's default-document behavior is enough,
+# no SPA catch-all fallback route is needed.
+FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend"
+app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

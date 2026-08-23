@@ -3,8 +3,20 @@
 // request to one fixed dev user regardless, so there's nothing to attach
 // here until Phase 3.
 
-export const API_BASE = window.__ALGOTERMINAL_API__ || "http://localhost:8001";
-const WS_BASE = API_BASE.replace(/^http/, "ws");
+// Local dev runs the frontend (nocache_server.py, :5173) and the backend
+// (uvicorn, :8001) as two separate processes, so it needs an explicit
+// cross-origin base. In production (Render), app/main.py serves both from
+// the SAME process/port -- same-origin, so a relative "" base is correct
+// there and must NOT be hardcoded to localhost. window.__ALGOTERMINAL_API__
+// still overrides both if ever needed.
+const IS_LOCAL_DEV_SERVER = window.location.port === "5173";
+export const API_BASE = window.__ALGOTERMINAL_API__ ?? (IS_LOCAL_DEV_SERVER ? "http://localhost:8001" : "");
+// WebSocket() requires an absolute ws://|wss:// URL, unlike fetch, which
+// resolves a relative path against the page's own origin automatically --
+// so an empty (same-origin) API_BASE needs its own explicit ws(s):// + host.
+const WS_BASE = API_BASE
+  ? API_BASE.replace(/^http/, "ws")
+  : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`;
 
 async function request(method, path, body) {
   const res = await fetch(`${API_BASE}${path}`, {
