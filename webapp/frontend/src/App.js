@@ -10,6 +10,8 @@ import { Optimizer } from "./pages/Optimizer.js";
 import { ManualTrade } from "./pages/ManualTrade.js";
 import { Accounts } from "./pages/Accounts.js";
 import { Landing } from "./pages/Landing.js";
+import { Ticker } from "./components/Ticker.js";
+import { StatusBar } from "./components/StatusBar.js";
 
 const ROUTES = {
   "": Landing,
@@ -61,6 +63,7 @@ export function App() {
   return html`
     <${React.Fragment}>
       ${!isLanding && html`
+        <${Ticker} />
         <nav class="topnav">
           <a href="#/" class="brand" style=${{ textDecoration: "none" }}>
             <span class="brand-mark">A</span>
@@ -81,6 +84,7 @@ export function App() {
         </nav>
       `}
       <${Page} />
+      ${!isLanding && html`<${StatusBar} />`}
     <//>
   `;
 }

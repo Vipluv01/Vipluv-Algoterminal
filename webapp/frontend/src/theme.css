@@ -75,6 +75,42 @@ body {
 
 .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
+/* ---------- Ticker ---------- */
+
+.ticker {
+  overflow: hidden; white-space: nowrap;
+  background: #05070c; border-bottom: 1px solid var(--border);
+  height: 28px; display: flex; align-items: center;
+}
+.ticker-track {
+  display: inline-flex; align-items: center;
+  animation: ticker-scroll 40s linear infinite;
+}
+.ticker:hover .ticker-track { animation-play-state: paused; }
+.ticker-item {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 0 20px; font-size: 11px; font-family: var(--font-mono);
+  border-right: 1px solid var(--border);
+}
+.ticker-symbol { color: var(--text-faint); font-weight: 700; letter-spacing: 0.03em; }
+@keyframes ticker-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+/* ---------- System status bar ---------- */
+
+.statusbar {
+  position: fixed; bottom: 0; left: 0; right: 0; z-index: 30;
+  display: flex; align-items: center; gap: 18px;
+  padding: 0 20px; height: 26px;
+  background: rgba(10,14,22,0.92); backdrop-filter: blur(12px);
+  border-top: 1px solid var(--border);
+  font-size: 10.5px; font-family: var(--font-mono); color: var(--text-faint);
+}
+.statusbar-item { display: flex; align-items: center; gap: 6px; }
+.statusbar-spacer { flex: 1; }
+
 /* ---------- Layout ---------- */
 
 .topnav {
@@ -126,7 +162,7 @@ body {
 .status-dot.dead { background: var(--ask); }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
 
-.page { flex: 1; padding: 22px 24px 40px; max-width: 1600px; margin: 0 auto; width: 100%; }
+.page { flex: 1; padding: 22px 24px 62px; max-width: 1600px; margin: 0 auto; width: 100%; }
 
 /* ---------- Cards / panels ---------- */
 
