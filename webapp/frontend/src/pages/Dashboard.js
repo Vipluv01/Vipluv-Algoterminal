@@ -3,14 +3,36 @@ import { html } from "../html.js";
 import { api } from "../api.js";
 import { fmtMoney, fmtPct, pnlClass } from "../format.js";
 import { Calendar } from "../components/Calendar.js";
+import { Sparkline } from "../components/Sparkline.js";
+import { Gauge } from "../components/Gauge.js";
 import { useToast } from "../toast.js";
 
-function StatCard({ label, value, valueClass = "", sub }) {
+function StatCard({ label, value, valueClass = "", sub, right }) {
   return html`
-    <div class="stat-card">
-      <div class="stat-label">${label}</div>
-      <div class=${`stat-value mono ${valueClass}`}>${value}</div>
-      ${sub && html`<div class="stat-sub">${sub}</div>`}
+    <div class="stat-card" style=${{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "10px" }}>
+      <div>
+        <div class="stat-label">${label}</div>
+        <div class=${`stat-value mono ${valueClass}`}>${value}</div>
+        ${sub && html`<div class="stat-sub">${sub}</div>`}
+      </div>
+      ${right}
+    </div>
+  `;
+}
+
+// One small bar per day that had a realized trade, colored by whether
+// that day closed net positive -- the same "day win rate" number as a
+// card up top, but shown as a shape so a losing streak is visible at a
+// glance instead of only as a single aggregated percentage.
+function DayWinBars({ calendar }) {
+  if (!calendar.length) return null;
+  const recent = calendar.slice(-20);
+  return html`
+    <div style=${{ display: "flex", alignItems: "flex-end", gap: "2px", height: "24px", marginTop: "8px" }}>
+      ${recent.map((d) => html`
+        <div key=${d.day} title=${`${d.day}: ${fmtMoney(d.pnl)}`}
+             style=${{ flex: 1, height: "100%", borderRadius: "2px", background: d.pnl >= 0 ? "var(--bid-bright)" : "var(--ask-bright)", opacity: d.pnl >= 0 ? 0.9 : 0.6 }} />
+      `)}
     </div>
   `;
 }
@@ -75,16 +97,27 @@ export function Dashboard() {
     api.dashboard.calendar().then(setCalendar);
   }, []);
 
+  let running = 0;
+  const equityCurve = calendar.map((d) => (running += d.pnl));
+
   return html`
     <div class="page fade-in">
       <h1 style=${{ margin: "0 0 4px", fontSize: "20px", fontWeight: 800, letterSpacing: "-0.01em" }}>Dashboard</h1>
       <div style=${{ color: "var(--text-faint)", fontSize: "12px", marginBottom: "20px" }}>Performance across every strategy and manual trade, paper mode</div>
 
       <div style=${{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "12px", marginBottom: "18px" }} class="dash-stats">
-        <${StatCard} label="Net P&L" value=${fmtMoney(stats?.net_pnl)} valueClass=${pnlClass(stats?.net_pnl)} />
+        <${StatCard} label="Net P&L" value=${fmtMoney(stats?.net_pnl)} valueClass=${pnlClass(stats?.net_pnl)}
+          right=${html`<${Sparkline} values=${equityCurve} />`} />
         <${StatCard} label="Trade Win Rate" value=${fmtPct(stats?.win_rate)} sub=${stats ? `${stats.n_trades} trades` : ""} />
-        <${StatCard} label="Day Win Rate" value=${fmtPct(stats?.day_win_rate)} />
-        <${StatCard} label="Profit Factor" value=${stats?.profit_factor ? stats.profit_factor.toFixed(2) : "—"} />
+        <div class="stat-card" style=${{ display: "flex", flexDirection: "column" }}>
+          <div class="stat-label">Day Win Rate</div>
+          <div class=${`stat-value mono`}>${fmtPct(stats?.day_win_rate)}</div>
+          <${DayWinBars} calendar=${calendar} />
+        </div>
+        <div class="stat-card" style=${{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+          <div class="stat-label" style=${{ alignSelf: "flex-start" }}>Profit Factor</div>
+          <${Gauge} value=${stats?.profit_factor ?? null} size=${100} />
+        </div>
         <${StatCard} label="Avg Win / Loss" value=${`${fmtMoney(stats?.avg_win, { decimals: 0 })} / ${fmtMoney(stats?.avg_loss, { decimals: 0 })}`} />
       </div>
 
