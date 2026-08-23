@@ -5,6 +5,7 @@ import { Charts } from "./pages/Charts.js";
 import { Dashboard } from "./pages/Dashboard.js";
 import { Strategies } from "./pages/Strategies.js";
 import { Risk } from "./pages/Risk.js";
+import { Accounts } from "./pages/Accounts.js";
 import { Landing } from "./pages/Landing.js";
 
 const ROUTES = {
@@ -15,6 +16,7 @@ const ROUTES = {
   "#/dashboard": Dashboard,
   "#/strategies": Strategies,
   "#/risk": Risk,
+  "#/accounts": Accounts,
 };
 
 const NAV_ITEMS = [
@@ -23,6 +25,7 @@ const NAV_ITEMS = [
   { hash: "#/dashboard", label: "Dashboard" },
   { hash: "#/strategies", label: "Strategies" },
   { hash: "#/risk", label: "Risk" },
+  { hash: "#/accounts", label: "Accounts" },
 ];
 
 function useHashRoute() {
