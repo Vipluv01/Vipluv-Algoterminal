@@ -94,9 +94,22 @@ class SymbolMarket:
         self.last_mid: float | None = None
         self.recent_returns: list[float] = []
         self.price_history.append(self.s0)
+        # Reserved order-id range for orders the web app itself submits
+        # (paper trades, and eventually live-confirmed orders) -- clear of
+        # every bot range this market's own agents use (noise=100-119,
+        # informed=200+, maker=1) and the seed-liquidity owner (999).
+        self._next_order_seq = 500_000
 
     def close(self) -> None:
         self.eng.close()
+
+    def next_order_id(self) -> int:
+        self._next_order_seq += 1
+        return self._next_order_seq
+
+    @property
+    def current_price(self) -> float:
+        return self.price_history[-1]
 
     def step(self) -> float:
         """Advances this symbol's own simulation by one step -- identical
@@ -155,6 +168,14 @@ class MarketRegistry:
         if symbol not in self.markets:
             raise KeyError(f"unknown symbol {symbol!r} -- available: {sorted(self.markets)}")
         return np.array(self.markets[symbol].price_history)
+
+    def current_prices(self) -> dict[str, float]:
+        return {sym: m.current_price for sym, m in self.markets.items()}
+
+    def __getitem__(self, symbol: str) -> SymbolMarket:
+        if symbol not in self.markets:
+            raise KeyError(f"unknown symbol {symbol!r} -- available: {sorted(self.markets)}")
+        return self.markets[symbol]
 
     def close(self) -> None:
         for m in self.markets.values():

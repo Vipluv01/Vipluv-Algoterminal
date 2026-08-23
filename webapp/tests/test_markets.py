@@ -52,6 +52,45 @@ def test_unknown_symbol_raises_a_clear_error():
         registry.close()
 
 
+def test_next_order_id_is_unique_and_increasing():
+    m = SymbolMarket(symbol="TCS", s0=4000.0, seed=2)
+    try:
+        ids = [m.next_order_id() for _ in range(5)]
+        assert ids == sorted(set(ids))
+        assert len(set(ids)) == 5
+    finally:
+        m.close()
+
+
+def test_current_price_matches_the_latest_price_history_entry():
+    m = SymbolMarket(symbol="TCS", s0=4000.0, seed=2)
+    try:
+        assert m.current_price == 4000.0
+        m.step()
+        assert m.current_price == m.price_history[-1]
+    finally:
+        m.close()
+
+
+def test_registry_current_prices_covers_every_symbol():
+    registry = MarketRegistry(symbols={"ICICIBANK": 1250.0, "HDFCBANK": 1650.0}, seed=0)
+    try:
+        prices = registry.current_prices()
+        assert prices == {"ICICIBANK": 1250.0, "HDFCBANK": 1650.0}
+    finally:
+        registry.close()
+
+
+def test_registry_getitem_returns_the_named_symbol_market():
+    registry = MarketRegistry(symbols={"ICICIBANK": 1250.0}, seed=0)
+    try:
+        assert registry["ICICIBANK"].symbol == "ICICIBANK"
+        with pytest.raises(KeyError):
+            registry["NOPE"]
+    finally:
+        registry.close()
+
+
 def test_symbol_market_price_history_starts_at_its_own_seed_price():
     m = SymbolMarket(symbol="RELIANCE", s0=2900.0, seed=1)
     try:

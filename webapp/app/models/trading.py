@@ -96,6 +96,13 @@ class Order(Base):
     status: Mapped[OrderStatus] = mapped_column(Enum(OrderStatus), index=True)
     filled_qty: Mapped[int] = mapped_column(Integer, default=0)
     avg_fill_px: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The id this order was actually submitted to the SymbolMarket's bourse
+    # Engine under -- needed to cancel a still-resting GTC limit order
+    # against the real book later. Distinct from this row's own `id`
+    # (database primary key) and from broker_order_id (a live/Angel One
+    # concept) -- three different identity spaces for three different
+    # systems this order can exist in.
+    engine_order_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Set only for mode=live orders that actually reached the broker --
     # paper orders never have one, and a live order with status
     # pending_confirmation never has one yet either (see routers/orders.py:
