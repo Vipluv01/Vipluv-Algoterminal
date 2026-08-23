@@ -7,6 +7,7 @@ import { Strategies } from "./pages/Strategies.js";
 import { Risk } from "./pages/Risk.js";
 import { Pairs } from "./pages/Pairs.js";
 import { Optimizer } from "./pages/Optimizer.js";
+import { ManualTrade } from "./pages/ManualTrade.js";
 import { Accounts } from "./pages/Accounts.js";
 import { Landing } from "./pages/Landing.js";
 
@@ -19,6 +20,7 @@ const ROUTES = {
   "#/strategies": Strategies,
   "#/pairs": Pairs,
   "#/optimizer": Optimizer,
+  "#/trade": ManualTrade,
   "#/risk": Risk,
   "#/accounts": Accounts,
 };
@@ -30,6 +32,7 @@ const NAV_ITEMS = [
   { hash: "#/strategies", label: "Strategies" },
   { hash: "#/pairs", label: "Pairs" },
   { hash: "#/optimizer", label: "Optimizer" },
+  { hash: "#/trade", label: "Trade" },
   { hash: "#/risk", label: "Risk" },
   { hash: "#/accounts", label: "Accounts" },
 ];

@@ -57,7 +57,7 @@ function useCandleAggregator(symbol) {
   return { onTick, seedChart, ready };
 }
 
-export function CandleChart({ symbol, price }) {
+export function CandleChart({ symbol, price, height = "440px" }) {
   const containerId = React.useId().replace(/:/g, "-");
   const chartRef = React.useRef(null);
   const { onTick, seedChart } = useCandleAggregator(symbol);
@@ -95,5 +95,5 @@ export function CandleChart({ symbol, price }) {
     if (price !== null && price !== undefined) onTick(price);
   }, [price, onTick]);
 
-  return html`<div id=${containerId} style=${{ width: "100%", height: "440px" }} />`;
+  return html`<div id=${containerId} style=${{ width: "100%", height }} />`;
 }
