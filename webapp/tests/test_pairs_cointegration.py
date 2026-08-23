@@ -95,6 +95,25 @@ def test_open_long_spread_position_closes_on_reversion_to_exit_z():
         assert result.signal_b.side == "buy"
 
 
+def test_leg_b_quantity_is_scaled_by_the_hedge_ratio_not_equal_to_leg_a():
+    """Regression test found by watching a real recording of Vipluv's own
+    prior system: its manual-trade screen showed ICICI 77 sh / HDFC 151 sh
+    at hedge beta=1.9564 (77 * 1.9564 ~= 151), NOT equal quantities on both
+    legs. An earlier version of this strategy used the same fixed qty for
+    both legs, which leaves the position exposed to the pair's shared
+    market-wide moves instead of purely to the spread -- defeating the
+    entire point of hedging."""
+    a, b = _cointegrated_pair(spread_amplitude=6.0)
+    strat = PairsCointegrationStrategy(entry_z=1.5, qty=10, min_history=90)
+    pair = PairSnapshot("A", "B", a, b, position="none")
+    result = strat.evaluate_pair(pair)
+    assert result is not None
+    assert result.signal_a.qty == 10
+    expected_qty_b = max(1, round(10 * result.hedge_ratio))
+    assert result.signal_b.qty == expected_qty_b
+    assert result.hedge_ratio != 0
+
+
 def test_stop_loss_closes_regardless_of_exit_threshold():
     strat = PairsCointegrationStrategy(entry_z=1.5, exit_z=0.0, stop_z=3.0, min_history=90, zscore_window=60)
     a, b = _cointegrated_pair(spread_amplitude=20.0)  # push z far past stop_z

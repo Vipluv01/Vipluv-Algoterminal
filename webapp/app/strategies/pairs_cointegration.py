@@ -60,6 +60,7 @@ class PairSignal:
     new_position: PairPosition
     cointegration_pvalue: float
     zscore: float
+    hedge_ratio: float
 
 
 class PairsCointegrationStrategy:
@@ -90,6 +91,18 @@ class PairsCointegrationStrategy:
         if len(a) < self.min_history or len(a) != len(b):
             return None
 
+        # Kalman hedge ratio is computed unconditionally, even when the pair
+        # turns out not to be cointegrated below -- an existing open
+        # position still needs a real beta to unwind the B leg correctly by
+        # (not the equal-quantity bug fixed above), so "not cointegrated
+        # anymore" must still be able to size a proper close.
+        kf = KalmanHedgeRatio()
+        betas = np.empty(len(a))
+        for i in range(len(a)):
+            betas[i] = kf.update(a[i], b[i])
+        spread = a - betas * b
+        beta = float(betas[-1])
+
         # Engle-Granger cointegration test on the FULL available history --
         # this is the check the old Algo Terminal skipped, using correlation
         # (0.74) as a stand-in for it. Correlated random walks have no
@@ -101,14 +114,8 @@ class PairsCointegrationStrategy:
             # holding a position whose statistical justification just
             # disappeared.
             if pair.position != "none":
-                return self._close(pair, pvalue, zscore=float("nan"))
+                return self._close(pair, pvalue, zscore=float("nan"), beta=beta)
             return None
-
-        kf = KalmanHedgeRatio()
-        betas = np.empty(len(a))
-        for i in range(len(a)):
-            betas[i] = kf.update(a[i], b[i])
-        spread = a - betas * b
 
         window = spread[-self.zscore_window:]
         mean, std = window.mean(), window.std(ddof=0)
@@ -118,35 +125,53 @@ class PairsCointegrationStrategy:
 
         if pair.position == "none":
             if z >= self.entry_z:
-                return self._enter("short_spread", pair, pvalue, z)
+                return self._enter("short_spread", pair, pvalue, z, beta)
             if z <= -self.entry_z:
-                return self._enter("long_spread", pair, pvalue, z)
+                return self._enter("long_spread", pair, pvalue, z, beta)
             return None
 
         # Already in a position: stop-loss takes priority over a normal exit.
         if abs(z) >= self.stop_z:
-            return self._close(pair, pvalue, z)
+            return self._close(pair, pvalue, z, beta)
         reverted = (pair.position == "long_spread" and z >= self.exit_z) or \
                    (pair.position == "short_spread" and z <= self.exit_z)
         if reverted:
-            return self._close(pair, pvalue, z)
+            return self._close(pair, pvalue, z, beta)
         return None
 
-    def _enter(self, direction: PairPosition, pair: PairSnapshot, pvalue: float, z: float) -> PairSignal:
+    def _leg_b_qty(self, beta: float) -> int:
+        """The B leg must be sized in proportion to the current hedge ratio,
+        not equal to leg A's quantity -- verified directly against a real
+        example (icici_mean_reversion's own manual-trade screen showed
+        ICICI 77 sh / HDFC 151 sh at beta=1.9564; 77 * 1.9564 ~= 151). Equal
+        quantities on both legs would leave the position NOT
+        dollar/beta-neutral, meaning it's exposed to the pair's shared
+        market-wide moves rather than purely to the spread -- defeating the
+        entire point of trading a hedged pair instead of two single stocks.
+        Minimum 1 share so a very small beta never rounds a real leg away
+        to zero.
+        """
+        return max(1, round(self.qty * beta))
+
+    def _enter(self, direction: PairPosition, pair: PairSnapshot, pvalue: float, z: float, beta: float) -> PairSignal:
+        qty_b = self._leg_b_qty(beta)
         if direction == "long_spread":
             sig_a = Signal("buy", self.qty, "market", None, f"pairs entry: z={z:.2f} <= -{self.entry_z}, long spread")
-            sig_b = Signal("sell", self.qty, "market", None, f"pairs entry: z={z:.2f} <= -{self.entry_z}, short {pair.symbol_b} leg")
+            sig_b = Signal("sell", qty_b, "market", None, f"pairs entry: z={z:.2f} <= -{self.entry_z}, short {pair.symbol_b} leg, beta={beta:.4f}")
         else:
             sig_a = Signal("sell", self.qty, "market", None, f"pairs entry: z={z:.2f} >= {self.entry_z}, short spread")
-            sig_b = Signal("buy", self.qty, "market", None, f"pairs entry: z={z:.2f} >= {self.entry_z}, long {pair.symbol_b} leg")
-        return PairSignal(sig_a, sig_b, direction, pvalue, z)
+            sig_b = Signal("buy", qty_b, "market", None, f"pairs entry: z={z:.2f} >= {self.entry_z}, long {pair.symbol_b} leg, beta={beta:.4f}")
+        return PairSignal(sig_a, sig_b, direction, pvalue, z, beta)
 
-    def _close(self, pair: PairSnapshot, pvalue: float, zscore: float) -> PairSignal:
-        # Closing is the mirror image of whichever side is currently open.
+    def _close(self, pair: PairSnapshot, pvalue: float, zscore: float, beta: float) -> PairSignal:
+        # Closing is the mirror image of whichever side is currently open --
+        # same beta-scaled B-leg quantity used to open it, so the position
+        # is fully unwound rather than leaving a residual on either leg.
+        qty_b = self._leg_b_qty(beta)
         if pair.position == "long_spread":
             sig_a = Signal("sell", self.qty, "market", None, f"pairs exit/stop: z={zscore:.2f}, closing long spread")
-            sig_b = Signal("buy", self.qty, "market", None, f"pairs exit/stop: z={zscore:.2f}, closing {pair.symbol_b} leg")
+            sig_b = Signal("buy", qty_b, "market", None, f"pairs exit/stop: z={zscore:.2f}, closing {pair.symbol_b} leg")
         else:
             sig_a = Signal("buy", self.qty, "market", None, f"pairs exit/stop: z={zscore:.2f}, closing short spread")
-            sig_b = Signal("sell", self.qty, "market", None, f"pairs exit/stop: z={zscore:.2f}, closing {pair.symbol_b} leg")
-        return PairSignal(sig_a, sig_b, "none", pvalue, zscore)
+            sig_b = Signal("sell", qty_b, "market", None, f"pairs exit/stop: z={zscore:.2f}, closing {pair.symbol_b} leg")
+        return PairSignal(sig_a, sig_b, "none", pvalue, zscore, beta)
