@@ -17,6 +17,7 @@ from app.db import get_db
 from app.markets import MarketRegistry
 from app.models.trading import Mode, Order, OrderStatus, OrderType, Side
 from app.models.user import User
+from app.orders_limits import MAX_ORDER_QTY
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -29,7 +30,7 @@ class SubmitOrderRequest(BaseModel):
     symbol: str
     side: Literal["buy", "sell"]
     order_type: Literal["limit", "market"] = "market"
-    qty: int = Field(gt=0, le=100_000)
+    qty: int = Field(gt=0, le=MAX_ORDER_QTY)
     px: float | None = None
     mode: Literal["paper", "live"] = "paper"
     strategy_key: str | None = None

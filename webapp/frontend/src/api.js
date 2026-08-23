@@ -39,6 +39,8 @@ export const api = {
 
   account: () => request("GET", "/account"),
 
+  risk: () => request("GET", "/risk"),
+
   strategies: {
     list: () => request("GET", "/strategies"),
     allocations: () => request("GET", "/strategies/allocations"),

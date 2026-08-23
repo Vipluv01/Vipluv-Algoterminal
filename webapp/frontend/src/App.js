@@ -4,6 +4,7 @@ import { Terminal } from "./pages/Terminal.js";
 import { Charts } from "./pages/Charts.js";
 import { Dashboard } from "./pages/Dashboard.js";
 import { Strategies } from "./pages/Strategies.js";
+import { Risk } from "./pages/Risk.js";
 import { Landing } from "./pages/Landing.js";
 
 const ROUTES = {
@@ -13,6 +14,7 @@ const ROUTES = {
   "#/charts": Charts,
   "#/dashboard": Dashboard,
   "#/strategies": Strategies,
+  "#/risk": Risk,
 };
 
 const NAV_ITEMS = [
@@ -20,6 +22,7 @@ const NAV_ITEMS = [
   { hash: "#/charts", label: "Charts" },
   { hash: "#/dashboard", label: "Dashboard" },
   { hash: "#/strategies", label: "Strategies" },
+  { hash: "#/risk", label: "Risk" },
 ];
 
 function useHashRoute() {

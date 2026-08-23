@@ -19,8 +19,15 @@ Needs the backend running first (`cd .. && .venv/bin/uvicorn app.main:app --port
 then serve this directory as static files:
 
 ```bash
-python3 -m http.server 5173
+python3 nocache_server.py
 ```
+
+Use this instead of plain `python3 -m http.server` -- during development,
+the browser cached JS modules aggressively enough across reloads that a
+just-fixed bug kept appearing to still be broken (the browser was running
+the OLD module, not the edited one). `nocache_server.py` is the same
+`SimpleHTTPRequestHandler` with `Cache-Control: no-store` forced onto
+every response.
 
 Open http://localhost:5173. The API base defaults to `http://localhost:8001`;
 override by setting `window.__ALGOTERMINAL_API__` before `main.js` loads
