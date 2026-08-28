@@ -4,6 +4,7 @@ import { api, subscribeMarket } from "../api.js";
 import { fmtMoney } from "../format.js";
 import { CandleChart } from "../components/CandleChart.js";
 import { useToast } from "../toast.js";
+import { consumeTicketIntent } from "../ticketIntent.js";
 
 const PAIRS_SYMBOL_A = "ICICIBANK";
 const PAIRS_SYMBOL_B = "HDFCBANK";
@@ -19,8 +20,13 @@ function NoteField({ note, setNote }) {
   `;
 }
 
-function SingleTicket({ symbols, symbol, setSymbol, price }) {
-  const [side, setSide] = React.useState("buy");
+function SingleTicket({ symbols, symbol, setSymbol, price, prefillSide }) {
+  // Initial value only (useState's lazy-init form), not a live-controlled
+  // prop: the B/S shortcut PRE-FILLS the ticket, it doesn't lock it -- the
+  // user can still freely toggle Buy/Sell afterward, same as any other
+  // field on this form. See ticketIntent.js's module comment for the
+  // safety boundary (this can only ever set an initial value, never submit).
+  const [side, setSide] = React.useState(() => prefillSide || "buy");
   const [orderType, setOrderType] = React.useState("market");
   const [qty, setQty] = React.useState("10");
   const [px, setPx] = React.useState("");
@@ -79,8 +85,8 @@ function SingleTicket({ symbols, symbol, setSymbol, price }) {
       </div>
 
       <div class="toggle-row" style=${{ marginBottom: "8px" }}>
-        <button class=${`btn ${side === "buy" ? "active buy" : ""}`} onClick=${() => setSide("buy")}>Buy</button>
-        <button class=${`btn ${side === "sell" ? "active sell" : ""}`} onClick=${() => setSide("sell")}>Sell</button>
+        <button class=${`btn ${side === "buy" ? "active buy" : ""}`} onClick=${() => setSide("buy")}>Buy <span class="shortcut-hint">B</span></button>
+        <button class=${`btn ${side === "sell" ? "active sell" : ""}`} onClick=${() => setSide("sell")}>Sell <span class="shortcut-hint">S</span></button>
       </div>
       <div class="toggle-row" style=${{ marginBottom: "14px" }}>
         <button class=${`btn ${orderType === "limit" ? "active neutral" : ""}`} onClick=${() => setOrderType("limit")}>Limit</button>
@@ -220,6 +226,9 @@ function SpreadTicket({ pairData }) {
 }
 
 export function ManualTrade() {
+  // Read once, at mount -- see ticketIntent.js: a B/S shortcut sets this
+  // right before navigating here, and this page is the one-shot consumer.
+  const [ticketIntent] = React.useState(() => consumeTicketIntent());
   const [mode, setMode] = React.useState("single");
   const [symbols, setSymbols] = React.useState([]);
   const [symbol, setSymbol] = React.useState(null);
@@ -307,7 +316,7 @@ export function ManualTrade() {
           `}
 
         ${mode === "single"
-          ? html`<${SingleTicket} symbols=${symbols} symbol=${symbol} setSymbol=${setSymbol} price=${tick?.price} />`
+          ? html`<${SingleTicket} symbols=${symbols} symbol=${symbol} setSymbol=${setSymbol} price=${tick?.price} prefillSide=${ticketIntent?.side} />`
           : html`<${SpreadTicket} pairData=${pairData} />`}
       </div>
     </div>

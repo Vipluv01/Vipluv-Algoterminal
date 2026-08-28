@@ -1,46 +1,133 @@
 import React from "react";
 import { html } from "../html.js";
 import { api } from "../api.js";
-import { fmtNum, fmtPct } from "../format.js";
+import { useToast } from "../toast.js";
+import { refreshRiskStatus } from "../riskStatus.js";
 
-function ControlCard({ label, value, body }) {
+// {key, label, body, decimals?, isPercent?} -- every field
+// RiskControlsUpdate (app/routers/risk.py) actually accepts, editable here.
+// The previous version of this page displayed "Pairs Cointegration
+// p-value Ceiling" by reading risk.pairs_coint_pvalue_max -- a field that
+// doesn't exist on RiskControlsOut (the real name is coint_pvalue_max, no
+// pairs_ prefix), so that card always silently rendered undefined. Fixed
+// below as part of making every one of these fields real and editable,
+// not just re-displaying the same typo with an input box added.
+const FIELDS = [
+  { key: "max_order_qty", label: "Max Order Quantity", body: "Hard ceiling on every single order, paper or live — independent of any strategy's own sizing logic." },
+  { key: "kelly_multiplier", label: "Fractional Kelly Multiplier", body: "Applied on top of the full Kelly fraction — full Kelly is growth-optimal but high-variance under estimation error, so this scales it down." },
+  { key: "max_position_fraction", label: "Max Position Fraction", body: "Hard ceiling on account fraction per position, independent of what the Kelly math computes — no single calculation is trusted to bound itself." },
+  { key: "daily_max_drawdown_pct", label: "Daily Max Drawdown", body: "Trips the circuit breaker for the rest of the trading day once realized loss crosses this fraction of account value." },
+  { key: "pairs_entry_z", label: "Pairs Entry Z-Score", body: "Spread must deviate at least this many standard deviations from its rolling mean before the pairs strategy enters." },
+  { key: "pairs_exit_z", label: "Pairs Exit Z-Score", body: "Normal, non-stop exit threshold — the spread reverting this close to its mean closes the position on schedule." },
+  { key: "pairs_stop_z", label: "Pairs Stop Z-Score", body: "Force-closes the position regardless of the normal exit threshold — takes priority over everything else." },
+  { key: "coint_pvalue_max", label: "Cointegration p-value Ceiling", body: "Engle-Granger test must clear this before any pairs signal fires at all — the check the old Algo Terminal skipped." },
+];
+
+function ControlCard({ field, value, editValue, onChange, dirty }) {
   return html`
     <div class="stat-card">
-      <div class="stat-label">${label}</div>
-      <div class="stat-value mono">${value}</div>
-      <div class="stat-sub">${body}</div>
+      <div class="stat-label">${field.label}</div>
+      <div class="field" style=${{ marginTop: "6px", marginBottom: "6px" }}>
+        <input class="input" type="number" step="any" value=${editValue}
+               onInput=${(e) => onChange(e.target.value)} style=${{ fontSize: "16px", fontWeight: 700 }} />
+      </div>
+      <div class="stat-sub">
+        ${field.body}
+        ${dirty && html`<span style=${{ color: "var(--accent-bright)", display: "block", marginTop: "4px" }}>Unsaved</span>`}
+      </div>
     </div>
   `;
 }
 
 export function Risk() {
   const [risk, setRisk] = React.useState(null);
-  React.useEffect(() => { api.risk().then(setRisk); }, []);
+  const [edits, setEdits] = React.useState({}); // key -> string (raw input value)
+  const [saving, setSaving] = React.useState(false);
+  const toast = useToast();
+
+  const load = React.useCallback(() => {
+    api.risk.get().then((r) => { setRisk(r); setEdits({}); });
+  }, []);
+  React.useEffect(() => { load(); }, [load]);
+
+  function editValueFor(field) {
+    if (field.key in edits) return edits[field.key];
+    if (!risk) return "";
+    return String(risk[field.key]);
+  }
+
+  const dirtyKeys = Object.keys(edits).filter((k) => risk && String(risk[k]) !== edits[k]);
+  const hasDirty = dirtyKeys.length > 0;
+
+  async function save() {
+    const body = {};
+    for (const k of dirtyKeys) {
+      const num = Number(edits[k]);
+      if (Number.isNaN(num)) return toast(`${k} isn't a valid number`, "err");
+      body[k] = num;
+    }
+    setSaving(true);
+    try {
+      const updated = await api.risk.update(body);
+      setRisk(updated);
+      setEdits({});
+      await refreshRiskStatus(); // in case a change interacts with the halt state's own display elsewhere
+      toast("Risk controls updated", "ok");
+    } catch (e) {
+      toast(e.message || "Could not save risk controls", "err");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function resetHalt() {
+    try {
+      const updated = await api.risk.resetHalt();
+      setRisk(updated);
+      await refreshRiskStatus();
+      toast("Trading halt cleared", "ok");
+    } catch (e) {
+      toast(e.message || "Could not clear the halt", "err");
+    }
+  }
 
   return html`
     <div class="page fade-in">
-      <h1 style=${{ margin: "0 0 4px", fontSize: "20px", fontWeight: 800, letterSpacing: "-0.01em" }}>Risk</h1>
-      <div style=${{ color: "var(--text-faint)", fontSize: "12px", marginBottom: "20px" }}>
-        What the system actually enforces on every order, not aspirational settings that live only in a doc.
+      <div style=${{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "10px", marginBottom: "20px" }}>
+        <div>
+          <h1 style=${{ margin: "0 0 4px", fontSize: "20px", fontWeight: 800, letterSpacing: "-0.01em" }}>Risk</h1>
+          <div style=${{ color: "var(--text-faint)", fontSize: "12px" }}>
+            What the system actually enforces on every order, paper or live — edit and save to change it for real.
+          </div>
+        </div>
+        ${risk && html`
+          <div style=${{ display: "flex", alignItems: "center", gap: "10px" }}>
+            <span class=${`badge ${risk.trading_halted ? "badge-off" : "badge-live"}`}>
+              ${risk.trading_halted ? "● CIRCUIT BREAKER: HALTED" : "● CIRCUIT BREAKER: ARMED"}
+            </span>
+            ${risk.trading_halted && html`<button class="btn btn-sm" onClick=${resetHalt}>Clear Halt</button>`}
+          </div>
+        `}
       </div>
 
       ${!risk
         ? html`<div class="skeleton" style=${{ height: "160px" }} />`
         : html`
-          <div style=${{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "12px" }} class="dash-stats">
-            <${ControlCard} label="Max Order Quantity" value=${fmtNum(risk.max_order_qty)}
-              body="Hard ceiling on every single order, paper or live — independent of any strategy's own sizing logic." />
-            <${ControlCard} label="Fractional Kelly Multiplier" value=${fmtPct(risk.kelly_multiplier)}
-              body="Applied on top of the full Kelly fraction — full Kelly is growth-optimal but high-variance under estimation error, so this scales it down." />
-            <${ControlCard} label="Max Position Fraction" value=${fmtPct(risk.max_position_fraction)}
-              body="Hard ceiling on account fraction per position, independent of what the Kelly math computes — no single calculation is trusted to bound itself." />
-            <${ControlCard} label="Pairs Entry Z-Score" value=${`±${risk.pairs_entry_z}σ`}
-              body="Spread must deviate at least this many standard deviations from its rolling mean before the pairs strategy enters." />
-            <${ControlCard} label="Pairs Stop Z-Score" value=${`±${risk.pairs_stop_z}σ`}
-              body="Force-closes the position regardless of the normal exit threshold — takes priority over everything else." />
-            <${ControlCard} label="Cointegration p-value Ceiling" value=${risk.pairs_coint_pvalue_max}
-              body="Engle-Granger test must clear this before any pairs signal fires at all — the check the old Algo Terminal skipped." />
-          </div>
+          <${React.Fragment}>
+            <div style=${{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "12px" }} class="dash-stats">
+              ${FIELDS.map((f) => html`
+                <${ControlCard} key=${f.key} field=${f} editValue=${editValueFor(f)}
+                                dirty=${dirtyKeys.includes(f.key)}
+                                onChange=${(v) => setEdits((e) => ({ ...e, [f.key]: v }))} />
+              `)}
+            </div>
+            <div style=${{ display: "flex", gap: "10px", marginTop: "16px" }}>
+              <button class="btn btn-primary" disabled=${!hasDirty || saving} onClick=${save}>
+                ${saving ? "Saving…" : `Save Changes${hasDirty ? ` (${dirtyKeys.length})` : ""}`}
+              </button>
+              ${hasDirty && html`<button class="btn btn-ghost" onClick=${() => setEdits({})} disabled=${saving}>Discard</button>`}
+            </div>
+          <//>
         `}
     </div>
   `;

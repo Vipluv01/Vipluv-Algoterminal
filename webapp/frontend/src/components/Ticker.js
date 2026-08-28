@@ -2,6 +2,7 @@ import React from "react";
 import { html } from "../html.js";
 import { api, subscribeMarket } from "../api.js";
 import { fmtMoney } from "../format.js";
+import { DEFAULT_STALE_THRESHOLD_MS, useNow } from "../clock.js";
 
 // A live scrolling ticker strip across every named instrument -- every
 // other page in algoterminal already proves the real-time data exists
@@ -12,16 +13,38 @@ import { fmtMoney } from "../format.js";
 export function Ticker() {
   const [symbols, setSymbols] = React.useState([]);
   const [ticks, setTicks] = React.useState({});
+  // Per-SYMBOL last-tick timestamp, not one shared flag: this component
+  // holds N independent WebSocket subscriptions (one per instrument, via
+  // the fan-out below), unlike Terminal.js/StatusBar.js which each watch
+  // a single connection. Reusing a single boolean here would have to pick
+  // one subscription to represent all of them, silently hiding it if a
+  // DIFFERENT symbol's feed is the one that actually dropped. Every
+  // ticker cell judges its own staleness against its own last tick.
+  const [lastUpdatedAt, setLastUpdatedAt] = React.useState({});
+  const now = useNow();
 
   React.useEffect(() => { api.symbols().then(setSymbols); }, []);
 
   React.useEffect(() => {
     if (!symbols.length) return;
-    const unsubs = symbols.map((s) =>
-      subscribeMarket(s.symbol, (tick) => {
-        setTicks((prev) => ({ ...prev, [s.symbol]: tick.price }));
-      })
-    );
+    // /symbols also returns derived indices (NIFTY50, BANKNIFTY --
+    // is_derived: true), but /ws/market/{symbol} only streams the
+    // NAMED_INSTRUMENTS constituents each is computed FROM (there's no
+    // live per-tick feed for a derived index itself). Subscribing to one
+    // anyway isn't a graceful no-op: market_ws.py rejects an unknown
+    // symbol by calling websocket.close() before accept(), which Starlette
+    // turns into an HTTP 403 at the handshake -- a real, visible connection
+    // failure every single page load, not a quiet skip. Filtered out here;
+    // a derived index's price/pct just render as the dash sentinel below
+    // rather than a number this ticker was never actually fed.
+    const unsubs = symbols
+      .filter((s) => !s.is_derived)
+      .map((s) =>
+        subscribeMarket(s.symbol, (tick) => {
+          setTicks((prev) => ({ ...prev, [s.symbol]: tick.price }));
+          setLastUpdatedAt((prev) => ({ ...prev, [s.symbol]: Date.now() }));
+        })
+      );
     return () => unsubs.forEach((u) => u());
   }, [symbols]);
 
@@ -30,7 +53,9 @@ export function Ticker() {
   const items = symbols.map((s) => {
     const price = ticks[s.symbol];
     const pct = price != null ? ((price - s.reference_price) / s.reference_price) * 100 : null;
-    return { symbol: s.symbol, price, pct };
+    const updatedAt = lastUpdatedAt[s.symbol];
+    const stale = updatedAt === undefined || now - updatedAt > DEFAULT_STALE_THRESHOLD_MS;
+    return { symbol: s.symbol, price, pct, stale };
   });
 
   // Duplicated once so the CSS marquee can loop seamlessly (scroll exactly
@@ -43,7 +68,7 @@ export function Ticker() {
     <div class="ticker">
       <div class="ticker-track">
         ${track.map((it, i) => html`
-          <span key=${i} class="ticker-item">
+          <span key=${i} class=${`ticker-item ${it.stale && it.price != null ? "is-stale" : ""}`}>
             <span class="ticker-symbol">${it.symbol}</span>
             <span class="mono">${it.price != null ? fmtMoney(it.price) : "—"}</span>
             ${it.pct != null && html`

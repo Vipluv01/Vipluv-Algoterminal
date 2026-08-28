@@ -3,7 +3,14 @@ import { html } from "../html.js";
 import { api } from "../api.js";
 import { useToast } from "../toast.js";
 
-export function OrderEntry({ symbol, price, onOrderPlaced }) {
+// prefill: {side, price, nonce} | undefined -- click-to-trade support.
+// `nonce` (a fresh value, e.g. Date.now(), on every click) is what makes a
+// SECOND click on a DIFFERENT book level re-apply even when side happens
+// to be unchanged from the last click; without it, clicking two bid
+// levels in a row would only visibly react to the first one, since React
+// only re-runs an effect when its dependencies actually change, and
+// side="sell" -> side="sell" isn't a change.
+export function OrderEntry({ symbol, price, onOrderPlaced, prefill }) {
   const [side, setSide] = React.useState("buy");
   const [orderType, setOrderType] = React.useState("market");
   const [qty, setQty] = React.useState("10");
@@ -20,6 +27,19 @@ export function OrderEntry({ symbol, price, onOrderPlaced }) {
   React.useEffect(() => {
     if (!pxTouchedRef.current && price) setPx(price.toFixed(2));
   }, [price]);
+
+  // A click on a book level PRE-FILLS the ticket -- side, order type
+  // (limit, at that exact price), and price -- and stops there. It never
+  // calls submit(): reaching the order still requires the same explicit
+  // Submit click as typing every field in by hand would.
+  React.useEffect(() => {
+    if (!prefill) return;
+    setSide(prefill.side);
+    setOrderType("limit");
+    setPx(prefill.price.toFixed(2));
+    pxTouchedRef.current = true; // stop the live-price effect above from immediately overwriting this
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefill]);
 
   async function submit() {
     const qtyNum = parseInt(qty, 10);

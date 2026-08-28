@@ -9,7 +9,7 @@ const FEATURES = [
   },
   {
     title: "Real cointegration, not correlation",
-    body: "The pairs strategy runs an actual Engle-Granger test and a Kalman-filtered dynamic hedge ratio before ever sizing a trade — ported from a validated methodology (Sharpe 1.74, -6.78% max drawdown, walk-forward tested).",
+    body: "The pairs strategy runs an actual Engle-Granger test and a Kalman-filtered dynamic hedge ratio before ever sizing a trade — against a real matching engine, not a backtest replay with an invented Sharpe.",
   },
   {
     title: "Kelly-sized, risk-capped",
@@ -46,8 +46,8 @@ export function Landing() {
         <span class="badge badge-accent" style=${{ marginBottom: "18px" }}>● Paper Engine Live · Bourse Matching Core</span>
         <h1 class="landing-title">Systematic trading,<br/>built on a <span class="grad-text">real</span> matching engine.</h1>
         <p class="landing-sub">
-          Five strategies. A cointegration pairs trade with a validated, walk-forward-tested track record.
-          Kelly-sized. Paper mode fully automated, live mode always human-confirmed.
+          Five strategies, including a real cointegration pairs trade, running against bourse's own matching
+          engine — not a backtest replay. Kelly-sized. Paper mode fully automated, live mode always human-confirmed.
         </p>
         <div style=${{ display: "flex", gap: "12px", marginTop: "28px" }}>
           <a href="#/terminal" class="btn btn-primary btn-block" style=${{ width: "auto", padding: "12px 22px" }}>Open Terminal →</a>
@@ -57,9 +57,18 @@ export function Landing() {
 
       <div class="landing-stats">
         <div class="stat-card"><div class="stat-label">Strategies</div><div class="stat-value mono">${strategyCount ?? "—"}</div></div>
-        <div class="stat-card"><div class="stat-label">Pairs Cointegration p-value</div><div class="stat-value mono">0.024*</div><div class="stat-sub">*icici_mean_reversion backtest</div></div>
-        <div class="stat-card"><div class="stat-label">Backtested Sharpe</div><div class="stat-value mono">1.74*</div></div>
-        <div class="stat-card"><div class="stat-label">Max Drawdown</div><div class="stat-value mono neg">-6.78%*</div></div>
+        <div class="stat-card"><div class="stat-label">Submit / Cancel / Sweep (p50)</div><div class="stat-value mono">80 / 19 / 123ns</div></div>
+        <div class="stat-card"><div class="stat-label">Sustained Throughput</div><div class="stat-value mono">4.54M ops/sec</div><div class="stat-sub">at 2,255,203 resting orders</div></div>
+        <div class="stat-card"><div class="stat-label">Allocations</div><div class="stat-value mono">16</div><div class="stat-sub">across 27,000,000 operations</div></div>
+      </div>
+
+      <div class="panel panel-pad" style=${{ maxWidth: "1000px", margin: "20px auto 0" }}>
+        <div style=${{ fontWeight: 700, fontSize: "13px", marginBottom: "8px" }}>The honest strategy finding, not an invented Sharpe</div>
+        <div style=${{ color: "var(--text-dim)", fontSize: "12.5px", lineHeight: 1.6 }}>
+          12 strategies backtested across seeded Monte Carlo paths. Gross directional alpha is positive; net is
+          negative after 4bps round-trip costs. Fee drag is 92–103% of realized P&L, flat across horizons from
+          500 to 20,000 bars. That's a stronger claim than any backtested Sharpe ratio, and it's true.
+        </div>
       </div>
 
       <div class="landing-features">
