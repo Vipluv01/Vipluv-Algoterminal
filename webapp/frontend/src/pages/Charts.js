@@ -1,8 +1,9 @@
 import React from "react";
 import { html } from "../html.js";
-import { api, subscribeMarket } from "../api.js";
+import { api, subscribeMarketForMode } from "../api.js";
 import { fmtMoney } from "../format.js";
 import { CandleChart } from "../components/CandleChart.js";
+import { useMode } from "../mode.js";
 
 const LAYOUT_KEY = "algoterminal:charts:layout";
 const PANES_KEY = "algoterminal:charts:panes";
@@ -45,10 +46,11 @@ function writeStored(key, value) {
 
 function ChartSlot({ pane, allSymbols, onChangeSymbol, onChangeInterval, onCrosshairMove, syncCrosshair }) {
   const [tick, setTick] = React.useState(null);
+  const mode = useMode();
   React.useEffect(() => {
-    const unsub = subscribeMarket(pane.symbol, setTick);
+    const unsub = subscribeMarketForMode(mode, pane.symbol, setTick);
     return unsub;
-  }, [pane.symbol]);
+  }, [pane.symbol, mode]);
 
   return html`
     <div class="panel panel-pad">

@@ -31,7 +31,8 @@ WORKDIR /app
 # alembic is required at startup -- app/main.py's lifespan runs migrations.
 RUN pip install --no-cache-dir \
     fastapi "uvicorn[standard]" sqlalchemy authlib httpx python-dotenv \
-    itsdangerous cryptography numpy scipy statsmodels pandas alembic nh3
+    itsdangerous cryptography numpy scipy statsmodels pandas alembic nh3 \
+    smartapi-python pyotp websocket-client logzero "psycopg[binary]"
 
 # Repo-root-relative layout, matching local dev exactly:
 #   /app/bin/simserver         <- app/markets.py + engine.py's find_simserver_binary()

@@ -1,12 +1,23 @@
-"""Order submission, cancellation, and listing -- paper mode only for now
-(Phase 4 wires live broker execution behind manual confirmation;
-submitting mode="live" here returns 501 until then, so the request shape
-doesn't need to change later).
+"""Order submission, cancellation, and listing.
+
+Three modes now (Mode.paper, Mode.virtual, Mode.live): paper and virtual
+share the identical simulated-engine submission path below (just a
+different Order.mode tag and starting-capital ledger -- see
+Mode.virtual's own docstring in models/trading.py), routed through
+`registry`/the bourse Engine exactly as before. live is a genuinely
+different path (_submit_live_order) that never touches the simulated
+registry at all -- a live order's symbol is a real NSE ticker, not one of
+the 7 simulated NAMED_INSTRUMENTS. Phase 4's manual-confirmation gate is
+now real: submitting mode="live" only ever creates a
+status=pending_confirmation row (nothing sent to Angel One yet); POST
+/orders/{id}/confirm is the separate step that actually dispatches it
+(app/broker/angelone.py), so a live order can never leave this process
+toward a real broker without an explicit second call.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -15,6 +26,9 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.brackets import cancel_brackets_closed_elsewhere
+from app.broker.adapter_cache import IncompleteBrokerCredentialError, NoBrokerCredentialError, get_adapter_for_user
+from app.broker.angelone import AngelOneError
+from app.broker.notify import notify_order_submitted
 from app.db import get_db
 from app.markets import DERIVED_INDICES, HUMAN_USER_OWNER_ID, MarketRegistry
 from app.models.trading import Bracket, Mode, Order, OrderStatus, OrderType, Side
@@ -38,7 +52,7 @@ class SubmitOrderRequest(BaseModel):
     # Trigger price for stop_limit orders. The engine has supported these
     # since internal/book/stops.go; this endpoint just never accepted them.
     stop_px: float | None = None
-    mode: Literal["paper", "live"] = "paper"
+    mode: Literal["paper", "virtual", "live"] = "paper"
     strategy_key: str | None = None
     # Optional bracket, attached only if this entry order actually fills
     # (any amount -- see submit_order below for the partial-fill case).
@@ -53,6 +67,7 @@ class SubmitOrderRequest(BaseModel):
 
 class OrderOut(BaseModel):
     id: int
+    mode: str
     symbol: str
     side: str
     order_type: str
@@ -66,8 +81,43 @@ class OrderOut(BaseModel):
     sub_account_id: int | None
     created_at: datetime
     strategy_key: str | None
+    # Both null until a live order is confirmed (POST /orders/{id}/confirm)
+    # -- see this module's own docstring on the two-step live flow. Always
+    # null for paper/virtual, which have no broker leg at all.
+    broker_order_id: str | None
+    confirmed_at: datetime | None
 
     model_config = {"from_attributes": True}
+
+
+def _submit_live_order(body: SubmitOrderRequest, user: User, db: Session) -> Order:
+    """Creates a status=pending_confirmation row and STOPS -- no broker
+    call, no engine, no symbol/tick validation against the simulated
+    registry (a live order's symbol is a real NSE ticker, not one of the 7
+    NAMED_INSTRUMENTS this registry knows about). POST /orders/{id}/confirm
+    is the only path that ever reaches Angel One."""
+    if body.order_type not in ("market", "limit"):
+        raise HTTPException(status_code=400, detail="live orders support order_type market or limit only")
+    if body.order_type == "limit" and body.px is None:
+        raise HTTPException(status_code=400, detail="limit orders require px")
+    if body.stop_loss_px is not None or body.take_profit_px is not None:
+        # A paper/virtual bracket is enforced by THIS process watching the
+        # simulated engine every tick (app/brackets.py) -- there is no
+        # equivalent here that could watch a real Angel One position and
+        # place a real closing order, so accepting these silently would be
+        # a promise this endpoint can't keep.
+        raise HTTPException(status_code=400, detail="stop_loss_px/take_profit_px are not yet supported for live orders")
+
+    order = Order(
+        user_id=user.id, mode=Mode.live, strategy_key=body.strategy_key,
+        symbol=body.symbol, side=Side(body.side), order_type=OrderType(body.order_type),
+        qty=body.qty, px=body.px, stop_px=None, status=OrderStatus.pending_confirmation,
+        filled_qty=0, avg_fill_px=None,
+    )
+    db.add(order)
+    db.commit()
+    db.refresh(order)
+    return order
 
 
 @router.post("", response_model=OrderOut)
@@ -77,13 +127,19 @@ def submit_order(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if body.mode == "live":
-        # Phase 4 (Angel One adapter, manual confirmation) isn't built yet
-        # -- 501, not a silently-accepted paper fill, so a live-mode UI
-        # built against this endpoint fails loudly instead of quietly
-        # trading paper money under a "live" label.
-        raise HTTPException(status_code=501, detail="live trading is not yet available")
+    # Applies uniformly to every mode now, checked BEFORE the mode branch
+    # below -- a live order that only ever reaches pending_confirmation
+    # here still needs to be blocked the same way a paper order already
+    # is; letting live skip this because it doesn't touch the engine yet
+    # would be exactly the kind of risk-gate gap Phase 7 was scoped to
+    # close, not introduce.
     raise_if_trading_halted(db, user.id)
+
+    if body.mode == "live":
+        return _submit_live_order(body, user, db)
+
+    mode_enum = Mode.virtual if body.mode == "virtual" else Mode.paper
+
     if body.symbol in DERIVED_INDICES:
         # NIFTY50/BANKNIFTY are derived baskets (app/markets.py), not real
         # simulated instruments with their own order book -- there is
@@ -132,7 +188,7 @@ def submit_order(
         status = OrderStatus.rejected
 
     order = Order(
-        user_id=user.id, mode=Mode.paper, strategy_key=body.strategy_key,
+        user_id=user.id, mode=mode_enum, strategy_key=body.strategy_key,
         symbol=body.symbol, side=Side(body.side), order_type=OrderType(body.order_type),
         qty=body.qty, px=body.px, stop_px=body.stop_px, status=status,
         filled_qty=result.filled_qty, avg_fill_px=avg_fill_px,
@@ -142,7 +198,7 @@ def submit_order(
     db.flush()  # need order.id before a Bracket can reference it
 
     if result.filled_qty > 0:
-        cancel_brackets_closed_elsewhere(db, user_id=user.id, symbol=body.symbol, order_side=body.side)
+        cancel_brackets_closed_elsewhere(db, user_id=user.id, symbol=body.symbol, order_side=body.side, mode=mode_enum)
 
     # Attach a bracket only if there's a real filled quantity to protect --
     # an order that rested or was fully rejected has no position yet for a
@@ -152,13 +208,69 @@ def submit_order(
     # position that was never fully opened.
     if result.filled_qty > 0 and (body.stop_loss_px is not None or body.take_profit_px is not None):
         db.add(Bracket(
-            user_id=user.id, mode=Mode.paper, symbol=body.symbol, entry_side=Side(body.side),
+            user_id=user.id, mode=mode_enum, symbol=body.symbol, entry_side=Side(body.side),
             qty=result.filled_qty, stop_loss_px=body.stop_loss_px, take_profit_px=body.take_profit_px,
             entry_order_id=order.id,
         ))
 
     db.commit()
     db.refresh(order)
+    return order
+
+
+@router.post("/{order_id}/confirm", response_model=OrderOut)
+def confirm_live_order(
+    order_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The second, explicit step of the live-order flow (see this
+    module's own docstring) -- the ONLY place an order actually reaches
+    Angel One. Re-checks raise_if_trading_halted: real time has passed
+    since the order was created (a human looking at a confirmation
+    dialog), during which the circuit breaker could have tripped -- the
+    check at submit time does not cover that window."""
+    order = db.get(Order, order_id)
+    if order is None or order.user_id != user.id:
+        raise HTTPException(status_code=404, detail="order not found")
+    if order.mode != Mode.live:
+        raise HTTPException(status_code=400, detail="only live orders require confirmation")
+    if order.status != OrderStatus.pending_confirmation:
+        raise HTTPException(status_code=400, detail=f"order is not pending confirmation (status={order.status})")
+
+    raise_if_trading_halted(db, user.id)
+
+    try:
+        adapter = get_adapter_for_user(db, user.id)
+    except (NoBrokerCredentialError, IncompleteBrokerCredentialError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        matches = adapter.search_symbol_token("NSE", order.symbol)
+        if not matches:
+            raise AngelOneError(f"could not resolve a symboltoken for symbol {order.symbol!r} on NSE")
+        match = matches[0]
+        broker_order_id = adapter.place_order(
+            symbol=match.get("tradingsymbol", order.symbol), symboltoken=match["symboltoken"],
+            exchange=match.get("exchange", "NSE"), side=order.side.value, qty=order.qty,
+            order_type="MARKET" if order.order_type == OrderType.market else "LIMIT", price=order.px,
+        )
+    except AngelOneError as e:
+        # Rejected, not silently left pending -- a human retrying a
+        # confirm that's genuinely going to keep failing (e.g. a bad
+        # symbol) needs a terminal status to see, not an order stuck
+        # forever in pending_confirmation.
+        order.status = OrderStatus.rejected
+        db.commit()
+        raise HTTPException(status_code=502, detail=f"Angel One rejected the order: {e}")
+
+    order.broker_order_id = broker_order_id
+    order.status = OrderStatus.submitted
+    order.confirmed_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(order)
+
+    notify_order_submitted(symbol=order.symbol, side=order.side.value, qty=order.qty, broker_order_id=broker_order_id)
     return order
 
 
@@ -172,8 +284,32 @@ def cancel_order(
     order = db.get(Order, order_id)
     if order is None or order.user_id != user.id:
         raise HTTPException(status_code=404, detail="order not found")
+
+    if order.mode == Mode.live and order.status == OrderStatus.pending_confirmation:
+        # Never reached the broker (confirm hasn't happened yet) -- a pure
+        # DB status flip, no engine_order_id and nothing to cancel on
+        # Angel One's side.
+        order.status = OrderStatus.cancelled
+        db.commit()
+        return {"ok": True, "order_id": order_id}
+
     if order.status not in (OrderStatus.submitted, OrderStatus.partially_filled):
         raise HTTPException(status_code=400, detail=f"cannot cancel an order in status {order.status}")
+
+    if order.mode == Mode.live:
+        # Already confirmed and dispatched -- a real broker order,
+        # cancelled through the same adapter confirm used to place it.
+        try:
+            adapter = get_adapter_for_user(db, user.id)
+            adapter.cancel_order(order.broker_order_id)
+        except (NoBrokerCredentialError, IncompleteBrokerCredentialError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except AngelOneError as e:
+            raise HTTPException(status_code=502, detail=f"Angel One rejected the cancel: {e}")
+        order.status = OrderStatus.cancelled
+        db.commit()
+        return {"ok": True, "order_id": order_id}
+
     if order.engine_order_id is None:
         raise HTTPException(status_code=500, detail="order has no engine_order_id -- cannot cancel")
 
@@ -200,7 +336,7 @@ MAX_ORDERS_PAGE_SIZE = 200
 @router.get("", response_model=list[OrderOut])
 def list_orders(
     response: Response,
-    mode: Literal["paper", "live"] | None = None,
+    mode: Literal["paper", "virtual", "live"] | None = None,
     status: OrderStatus | None = None,
     symbol: str | None = None,
     strategy: str | None = None,

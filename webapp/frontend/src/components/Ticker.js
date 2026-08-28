@@ -1,15 +1,17 @@
 import React from "react";
 import { html } from "../html.js";
-import { api, subscribeMarket } from "../api.js";
+import { api, subscribeMarketForMode } from "../api.js";
 import { fmtMoney } from "../format.js";
 import { DEFAULT_STALE_THRESHOLD_MS, useNow } from "../clock.js";
+import { useMode } from "../mode.js";
 
 // A live scrolling ticker strip across every named instrument -- every
 // other page in algoterminal already proves the real-time data exists
 // (Terminal/Charts subscribe per-symbol already); this is the same
-// subscribeMarket() primitive, just fanned out across all 7 symbols at
-// once and rendered as a continuously-scrolling marquee instead of a
-// single price display, matching a real trading terminal's index bar.
+// subscribeMarketForMode() primitive, just fanned out across all 7
+// symbols at once and rendered as a continuously-scrolling marquee
+// instead of a single price display, matching a real trading terminal's
+// index bar.
 export function Ticker() {
   const [symbols, setSymbols] = React.useState([]);
   const [ticks, setTicks] = React.useState({});
@@ -22,6 +24,7 @@ export function Ticker() {
   // ticker cell judges its own staleness against its own last tick.
   const [lastUpdatedAt, setLastUpdatedAt] = React.useState({});
   const now = useNow();
+  const mode = useMode();
 
   React.useEffect(() => { api.symbols().then(setSymbols); }, []);
 
@@ -37,16 +40,23 @@ export function Ticker() {
     // failure every single page load, not a quiet skip. Filtered out here;
     // a derived index's price/pct just render as the dash sentinel below
     // rather than a number this ticker was never actually fed.
+    //
+    // In live mode this opens N SIMULTANEOUS real Angel One WebSocket
+    // connections (one per named instrument) purely for a decorative
+    // strip -- fine for the simulated engine (unlimited fake connections
+    // cost nothing) but worth someone revisiting against Angel One's
+    // actual per-account WS connection limits before this ships live for
+    // real; flagged, not silently worked around here.
     const unsubs = symbols
       .filter((s) => !s.is_derived)
       .map((s) =>
-        subscribeMarket(s.symbol, (tick) => {
+        subscribeMarketForMode(mode, s.symbol, (tick) => {
           setTicks((prev) => ({ ...prev, [s.symbol]: tick.price }));
           setLastUpdatedAt((prev) => ({ ...prev, [s.symbol]: Date.now() }));
         })
       );
     return () => unsubs.forEach((u) => u());
-  }, [symbols]);
+  }, [symbols, mode]);
 
   if (!symbols.length) return null;
 

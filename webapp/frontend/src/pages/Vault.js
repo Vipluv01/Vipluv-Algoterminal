@@ -5,33 +5,66 @@ import { useToast } from "../toast.js";
 import { ErrorBoundary } from "../components/ErrorBoundary.js";
 import { EmptyState } from "../components/EmptyState.js";
 
-// STORE-ONLY screen. api_key/api_secret/access_token live in this
-// component's own state ONLY between the moment they're typed and the
-// moment the POST resolves -- cleared immediately after (success or
-// failure) rather than kept around, never written to localStorage, never
-// logged. The server itself never sends a decrypted secret back (see
-// app/routers/vault.py) -- there is no code path in this file that could
-// render one even by accident, because a full plaintext value is never
-// present in anything read FROM the server, only in what's typed and
-// about to be sent TO it.
+const BROKERS = [
+  { value: "angelone", label: "Angel One" },
+  { value: "zerodha", label: "Zerodha" },
+  { value: "groww", label: "Groww" },
+];
+
+// Angel One's SmartAPI login has no separate "api secret" the way Zerodha
+// does -- api_secret is repurposed to hold the account's trading password/
+// MPIN for this broker specifically (see LiveBrokerCredential's own
+// docstring in app/models/trading.py). client_code and totp_secret are
+// both genuinely REQUIRED for a real Angel One login even though the
+// backend schema only enforces api_key/api_secret -- app/broker/
+// angelone.py (not yet built) is what actually enforces the rest, so
+// letting an incomplete Angel One credential save here would look
+// configured and then silently fail the first time it's used, exactly
+// the failure mode this phase is designed to avoid (see mode.js).
+const IS_ANGEL_ONE = (broker) => broker === "angelone";
+
+// STORE-ONLY screen. api_key/api_secret/access_token/client_code/
+// totp_secret all live in this component's own state ONLY between the
+// moment they're typed and the moment the POST resolves -- cleared
+// immediately after (success or failure) rather than kept around, never
+// written to localStorage, never logged, and never echoed into a toast or
+// error message (only a fixed label like "Angel One" or the server's own
+// generic error detail ever appears there). The server itself never sends
+// a decrypted secret back (see app/routers/vault.py) -- there is no code
+// path in this file that could render one even by accident, because a
+// full plaintext value is never present in anything read FROM the
+// server, only in what's typed and about to be sent TO it.
 function CredentialForm({ existing, onClose, onSaved }) {
-  const [broker, setBroker] = React.useState(existing?.broker || "");
+  const [broker, setBroker] = React.useState(existing?.broker || BROKERS[0].value);
   const [apiKey, setApiKey] = React.useState("");
   const [apiSecret, setApiSecret] = React.useState("");
   const [accessToken, setAccessToken] = React.useState("");
+  const [clientCode, setClientCode] = React.useState("");
+  const [totpSecret, setTotpSecret] = React.useState("");
   const [saving, setSaving] = React.useState(false);
   const toast = useToast();
+  const isAngelOne = IS_ANGEL_ONE(broker);
+
+  function clearSensitiveFields() {
+    setApiKey("");
+    setApiSecret("");
+    setAccessToken("");
+    setClientCode("");
+    setTotpSecret("");
+  }
 
   async function submit() {
-    if (!broker.trim()) return toast("Broker name is required", "err");
-    if (!apiKey || !apiSecret) return toast("API key and secret are both required", "err");
+    if (!apiKey || !apiSecret) return toast(`API key and ${isAngelOne ? "trading password/MPIN" : "secret"} are both required`, "err");
+    if (isAngelOne && (!clientCode || !totpSecret)) return toast("Client code and TOTP secret are both required for Angel One", "err");
     setSaving(true);
     try {
       const saved = await api.vault.put({
-        broker: broker.trim(),
+        broker,
         api_key: apiKey,
         api_secret: apiSecret,
         access_token: accessToken || null,
+        client_code: clientCode || null,
+        totp_secret: totpSecret || null,
       });
       onSaved(saved);
       toast(existing ? "Credential rotated" : "Credential stored", "ok");
@@ -41,9 +74,7 @@ function CredentialForm({ existing, onClose, onSaved }) {
       // Cleared unconditionally -- a failed submit is exactly the case
       // where a stale plaintext value must NOT linger in memory waiting
       // for a retry the user may not even make.
-      setApiKey("");
-      setApiSecret("");
-      setAccessToken("");
+      clearSensitiveFields();
       setSaving(false);
     }
   }
@@ -54,16 +85,31 @@ function CredentialForm({ existing, onClose, onSaved }) {
       <div style=${{ display: "flex", flexDirection: "column", gap: "12px", marginTop: "10px" }}>
         <div class="field">
           <label style=${{ fontSize: "12px", color: "var(--text-faint)" }}>Broker</label>
-          <input class="input" value=${broker} onInput=${(e) => setBroker(e.target.value)} placeholder="e.g. angel_one" />
+          <select class="input" value=${broker} onChange=${(e) => setBroker(e.target.value)}>
+            ${BROKERS.map((b) => html`<option key=${b.value} value=${b.value}>${b.label}</option>`)}
+          </select>
         </div>
         <div class="field">
           <label style=${{ fontSize: "12px", color: "var(--text-faint)" }}>API Key</label>
           <input class="input" type="password" autocomplete="off" value=${apiKey} onInput=${(e) => setApiKey(e.target.value)} />
         </div>
         <div class="field">
-          <label style=${{ fontSize: "12px", color: "var(--text-faint)" }}>API Secret</label>
+          <label style=${{ fontSize: "12px", color: "var(--text-faint)" }}>${isAngelOne ? "Trading Password / MPIN" : "API Secret"}</label>
           <input class="input" type="password" autocomplete="off" value=${apiSecret} onInput=${(e) => setApiSecret(e.target.value)} />
         </div>
+        ${isAngelOne && html`
+          <div class="field">
+            <label style=${{ fontSize: "12px", color: "var(--text-faint)" }}>Client Code</label>
+            <input class="input" type="password" autocomplete="off" value=${clientCode} onInput=${(e) => setClientCode(e.target.value)} />
+          </div>
+          <div class="field">
+            <label style=${{ fontSize: "12px", color: "var(--text-faint)" }}>TOTP Secret</label>
+            <input class="input" type="password" autocomplete="off" value=${totpSecret} onInput=${(e) => setTotpSecret(e.target.value)} />
+            <div style=${{ color: "var(--text-faint)", fontSize: "11px", marginTop: "4px" }}>
+              The base32 seed from enabling TOTP in the Angel One app — not a live 6-digit code, which expires in seconds.
+            </div>
+          </div>
+        `}
         <div class="field">
           <label style=${{ fontSize: "12px", color: "var(--text-faint)" }}>Access Token <span style=${{ color: "var(--text-faint)" }}>(optional)</span></label>
           <input class="input" type="password" autocomplete="off" value=${accessToken} onInput=${(e) => setAccessToken(e.target.value)} />
@@ -94,21 +140,31 @@ function CredentialCard({ cred, onRotate, onRemove }) {
     }
   }
 
+  const isAngelOne = IS_ANGEL_ONE(cred.broker);
+  const brokerLabel = BROKERS.find((b) => b.value === cred.broker)?.label || cred.broker;
+
   return html`
     <div class="panel panel-pad" style=${{ maxWidth: "480px" }}>
       <div style=${{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
         <div>
-          <div class="panel-title" style=${{ marginBottom: "10px" }}>${cred.broker}</div>
+          <div class="panel-title" style=${{ marginBottom: "10px" }}>${brokerLabel}</div>
           <div class="stat-card" style=${{ marginBottom: "8px" }}>
             <div class="stat-label">API Key</div>
             <div class="stat-value mono">•••• ${cred.api_key_last4}</div>
           </div>
           <div class="stat-card" style=${{ marginBottom: "8px" }}>
-            <div class="stat-label">API Secret</div>
+            <div class="stat-label">${isAngelOne ? "Trading Password / MPIN" : "API Secret"}</div>
             <div class="stat-value mono">•••• ${cred.api_secret_last4}</div>
           </div>
+          ${cred.client_code_last4 && html`
+            <div class="stat-card" style=${{ marginBottom: "8px" }}>
+              <div class="stat-label">Client Code</div>
+              <div class="stat-value mono">•••• ${cred.client_code_last4}</div>
+            </div>
+          `}
           <div style=${{ fontSize: "12px", color: "var(--text-faint)" }}>
             ${cred.has_access_token ? "Access token on file. " : "No access token on file. "}
+            ${isAngelOne ? (cred.has_totp_secret ? "TOTP secret on file. " : "⚠ No TOTP secret on file — Angel One login will fail without one. ") : ""}
             Rotated ${new Date(cred.rotated_at).toLocaleString()}
           </div>
         </div>

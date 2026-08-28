@@ -19,6 +19,7 @@ from datetime import date, datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.accounting import STARTING_PAPER_CASH_DEFAULT, compute_account, compute_realizations
+from app.broker.notify import notify_circuit_breaker_trip
 from app.markets import MarketRegistry
 from app.models.trading import InstrumentType, Mode, Order, SubAccount
 from app.models.user import User
@@ -137,6 +138,13 @@ def check_circuit_breaker(db: Session, user: User, registry: MarketRegistry) -> 
 
     settings.trading_halted = True
     db.commit()
+    # Fire-and-forget, off this tick's own critical path -- see
+    # app/broker/notify.py's own docstring on why this can never become
+    # another synchronous, unoffloaded call in the tick loop's hot path.
+    # Only reached on the actual False->True transition (the already-
+    # halted branch above returns before this point), so this fires once
+    # per halt event, not once per tick while halted.
+    notify_circuit_breaker_trip(user_id=user.id)
 
     _liquidate_every_position(db, registry, user_id=user.id, all_orders=all_orders, current_prices=current_prices)
     db.commit()

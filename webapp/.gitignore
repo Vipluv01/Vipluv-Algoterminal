@@ -6,6 +6,10 @@ __pycache__/
 *.db-shm
 *.db-wal
 .env
+# SmartApi SDK's own side effect on construction (app/broker/angelone.py's
+# docstring) -- a per-day log file it creates unconditionally, not
+# something this app writes on purpose or wants committed.
+logs/
 # e2e diff output and ad-hoc captures are generated build artifacts, not
 # source -- screenshots/baseline/ IS tracked: gap2_visual_diff.py's own
 # docstring says it diffs against "the frozen tests/e2e/screenshots/baseline/

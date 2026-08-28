@@ -1,6 +1,6 @@
 import React from "react";
 import { html } from "../html.js";
-import { api, subscribeMarket } from "../api.js";
+import { api, subscribeMarketForMode } from "../api.js";
 import { DEFAULT_STALE_THRESHOLD_MS, formatAge, useStaleness } from "../clock.js";
 import { useDensity, setDensity, useTheme, toggleTheme } from "../theme.js";
 import { usePendingChord } from "../keyboard.js";
@@ -53,7 +53,7 @@ const HEARTBEAT_SYMBOL = "ICICIBANK";
 // dropped half a second ago and one that's been down for a minute both
 // report "reconnecting" from api.js's own point of view, and only the
 // elapsed time tells them apart.
-function useConnectionStatus() {
+function useConnectionStatus(mode) {
   const [wsStatus, setWsStatus] = React.useState("connecting");
   const [lastTickAt, setLastTickAt] = React.useState(null);
   // Client-computed (Date.now() - tick.sent_at), per tick -- see
@@ -63,7 +63,14 @@ function useConnectionStatus() {
   const [wsDeltaMs, setWsDeltaMs] = React.useState(null);
 
   React.useEffect(() => {
-    const unsub = subscribeMarket(
+    // In live mode this heartbeat is Angel One's own feed, not the
+    // simulated engine -- "SYSTEM: LIVE" should mean the trader's ACTUAL
+    // broker connection is healthy, not that an unrelated simulation is
+    // still ticking while the real feed they'd be trading against is down.
+    setWsStatus("connecting");
+    setLastTickAt(null);
+    const unsub = subscribeMarketForMode(
+      mode,
       HEARTBEAT_SYMBOL,
       (tick) => {
         setLastTickAt(Date.now());
@@ -72,7 +79,7 @@ function useConnectionStatus() {
       setWsStatus,
     );
     return unsub;
-  }, []);
+  }, [mode]);
 
   const freshness = useStaleness(lastTickAt, DEFAULT_STALE_THRESHOLD_MS);
 
@@ -98,12 +105,12 @@ const STATUS_LABEL = { connecting: "CONNECTING", live: "LIVE", reconnecting: "RE
 export function StatusBar() {
   const now = useClock();
   const ist = now.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour12: false });
-  const { status, lastTickAt, wsDeltaMs } = useConnectionStatus();
+  const mode = useMode();
+  const { status, lastTickAt, wsDeltaMs } = useConnectionStatus(mode);
   const orderLatency = useOrderLatency();
   const density = useDensity();
   const theme = useTheme();
   const pendingChord = usePendingChord();
-  const mode = useMode();
 
   return html`
     <div class="statusbar">

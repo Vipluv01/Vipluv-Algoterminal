@@ -23,6 +23,16 @@ PriceLookup = Callable[[str, object], "float | None"]
 
 STARTING_PAPER_CASH_DEFAULT = 100_000.0
 
+# Rs 1,00,00,000 (1 crore) -- Mode.virtual's own starting capital, a
+# deliberately different figure from paper's, not a copy-paste of it. This
+# whole platform is NSE/rupee-denominated (every simulated price, and
+# eventually every live Angel One price, is in Rs); an original-spec-style
+# "$100k" figure here would be exactly the kind of inconsistent number this
+# project has been careful to avoid. Virtual mode exists specifically to
+# rehearse position sizing at real-money scale before going live, which is
+# also why it's ~100x paper's figure rather than matching it.
+STARTING_VIRTUAL_CASH_DEFAULT = 1_00_00_000.0
+
 
 @dataclass(frozen=True)
 class SymbolPosition:

@@ -46,7 +46,7 @@ def check_trigger(*, entry_side: str, price: float, stop_loss_px: float | None, 
     return None
 
 
-def cancel_brackets_closed_elsewhere(db: Session, *, user_id: int, symbol: str, order_side: str) -> None:
+def cancel_brackets_closed_elsewhere(db: Session, *, user_id: int, symbol: str, order_side: str, mode: Mode = Mode.paper) -> None:
     """Any active bracket on this symbol whose entry_side is the OPPOSITE
     of a fill that just happened is watching a position that's now been
     reduced (or closed, or flipped) by something other than the bracket
@@ -70,7 +70,7 @@ def cancel_brackets_closed_elsewhere(db: Session, *, user_id: int, symbol: str, 
     opposite_side = Side.sell if order_side == "buy" else Side.buy
     active = (
         db.query(Bracket)
-        .filter(Bracket.user_id == user_id, Bracket.symbol == symbol,
+        .filter(Bracket.user_id == user_id, Bracket.symbol == symbol, Bracket.mode == mode,
                 Bracket.status == BracketStatus.active, Bracket.entry_side == opposite_side)
         .all()
     )
@@ -79,7 +79,18 @@ def cancel_brackets_closed_elsewhere(db: Session, *, user_id: int, symbol: str, 
 
 
 def monitor_brackets(db: Session, registry: MarketRegistry) -> None:
-    active = db.query(Bracket).filter(Bracket.status == BracketStatus.active, Bracket.mode == Mode.paper).all()
+    # paper AND virtual -- both trade the identical simulated engine (see
+    # Mode.virtual's own docstring in models/trading.py), so a virtual
+    # order's stop-loss/take-profit needs the same tick-loop monitoring a
+    # paper one gets. Never live: a live bracket would need to watch a
+    # REAL broker position and place a REAL closing order, which is out of
+    # this phase's scope (routers/orders.py never attaches a bracket to a
+    # live order for exactly this reason).
+    active = (
+        db.query(Bracket)
+        .filter(Bracket.status == BracketStatus.active, Bracket.mode.in_([Mode.paper, Mode.virtual]))
+        .all()
+    )
     for b in active:
         price = registry[b.symbol].current_price
         kind = check_trigger(entry_side=b.entry_side.value, price=price,
@@ -106,7 +117,7 @@ def _close_bracket(db: Session, registry: MarketRegistry, bracket: Bracket, kind
     )
 
     closing_order = Order(
-        user_id=bracket.user_id, mode=Mode.paper, strategy_key=f"bracket_{kind}",
+        user_id=bracket.user_id, mode=bracket.mode, strategy_key=f"bracket_{kind}",
         symbol=bracket.symbol, side=Side(closing_side), order_type=OrderType.market,
         qty=bracket.qty, px=None, status=status, filled_qty=result.filled_qty,
         avg_fill_px=avg_fill_px, engine_order_id=order_id,

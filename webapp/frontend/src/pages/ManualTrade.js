@@ -1,10 +1,14 @@
 import React from "react";
 import { html } from "../html.js";
-import { api, subscribeMarket } from "../api.js";
+import { api, subscribeMarketForMode } from "../api.js";
 import { fmtMoney } from "../format.js";
 import { CandleChart } from "../components/CandleChart.js";
+import { OrderModeBanner } from "../components/OrderModeBanner.js";
 import { useToast } from "../toast.js";
 import { consumeTicketIntent } from "../ticketIntent.js";
+// Aliased -- this page's own `mode` state already means single/spread
+// ticket UI, unrelated to the real trading mode (paper/virtual/live).
+import { useMode as useTradingMode } from "../mode.js";
 
 const PAIRS_SYMBOL_A = "ICICIBANK";
 const PAIRS_SYMBOL_B = "HDFCBANK";
@@ -74,8 +78,9 @@ function SingleTicket({ symbols, symbol, setSymbol, price, prefillSide }) {
   }
 
   return html`
-    <div class="panel panel-pad">
+    <div class="panel panel-pad order-ticket-panel">
       <div class="panel-title">Ticket</div>
+      <${OrderModeBanner} />
 
       <div class="field">
         <label>Symbol</label>
@@ -183,8 +188,9 @@ function SpreadTicket({ pairData }) {
   }
 
   return html`
-    <div class="panel panel-pad">
+    <div class="panel panel-pad order-ticket-panel">
       <div class="panel-title">Ticket</div>
+      <${OrderModeBanner} />
       <div class="field">
         <label>Spread</label>
         <div class="input" style=${{ color: "var(--text-dim)" }}>${PAIRS_SYMBOL_A} / ${PAIRS_SYMBOL_B} (fixed — the only validated pair)</div>
@@ -234,6 +240,7 @@ export function ManualTrade() {
   const [symbol, setSymbol] = React.useState(null);
   const [tick, setTick] = React.useState(null);
   const [pairData, setPairData] = React.useState(null);
+  const tradingMode = useTradingMode();
 
   React.useEffect(() => {
     api.symbols().then((rows) => {
@@ -245,9 +252,9 @@ export function ManualTrade() {
   React.useEffect(() => {
     if (mode !== "single" || !symbol) return;
     setTick(null);
-    const unsub = subscribeMarket(symbol, setTick);
+    const unsub = subscribeMarketForMode(tradingMode, symbol, setTick);
     return unsub;
-  }, [mode, symbol]);
+  }, [mode, symbol, tradingMode]);
 
   const loadPairData = React.useCallback(() => {
     if (mode !== "spread") return;

@@ -128,6 +128,14 @@ export const api = {
   // these (see app/routers/vault.py's module docstring) -- only last-4 +
   // a rotation timestamp. Nothing on the frontend should ever expect a
   // full api_key/api_secret back from a response here.
+  virtual: {
+    // Mirrors api.account()/api.equityCurve() almost exactly -- same
+    // shape, just Mode.virtual's own Rs 1cr-starting book instead of
+    // paper's (see app/routers/virtual.py's module docstring).
+    account: () => request("GET", "/virtual/account"),
+    equityCurve: () => request("GET", "/virtual/equity-curve"),
+  },
+
   vault: {
     get: () => request("GET", "/vault/credential"),
     put: (body) => request("POST", "/vault/credential", body),
@@ -180,6 +188,20 @@ export const api = {
       request("GET", `/market/history?symbol=${encodeURIComponent(symbol)}&interval=${interval}${limit ? `&limit=${limit}` : ""}`),
   },
 
+  // Live-mode equivalent of `market.history` above, backed by a real
+  // Angel One account instead of the simulated engine (see
+  // app/routers/live_market.py). Deliberately a SEPARATE endpoint, not a
+  // mode branch on GET /market/history -- paper/virtual keep using the
+  // simulated engine's history unconditionally. Note the narrower
+  // interval set: Angel One's candle API has no 5m/30m granularity (only
+  // 1m/15m/1hr/1d), so this is NOT a drop-in replacement for
+  // market.history's own interval keys -- see CandleChart.js's own
+  // mode-dependent CANDLE_SECONDS_OPTIONS.
+  live: {
+    history: (symbol, interval, limit) =>
+      request("GET", `/live/market/history?symbol=${encodeURIComponent(symbol)}&interval=${interval}${limit ? `&limit=${limit}` : ""}`),
+  },
+
   pairs: {
     overview: () => request("GET", "/pairs/overview"),
     analytics: () => request("GET", "/pairs/analytics"),
@@ -207,7 +229,13 @@ export const api = {
 // 3+ seconds and one that's merely mid-retry look identical from inside
 // this function, so "how long has it actually been down" belongs with
 // whoever is watching the clock, not duplicated here.
-export function subscribeMarket(symbol, onTick, onStatusChange) {
+// Shared by subscribeMarket and subscribeLiveMarket below -- identical
+// reconnect/backoff discipline either way, the only difference is which
+// path on WS_BASE they dial. Not exported: callers go through one of the
+// two named wrappers (or subscribeMarketForMode) so the path a given
+// caller ends up on is always explicit at the call site, not implied by
+// which arguments happened to be passed to a generic function.
+function _subscribeWs(wsPath, onTick, onStatusChange) {
   let ws = null;
   let closedByCaller = false;
   let retryDelay = 800;
@@ -217,7 +245,7 @@ export function subscribeMarket(symbol, onTick, onStatusChange) {
 
   function connect() {
     setStatus(everConnected ? "reconnecting" : "connecting");
-    ws = new WebSocket(`${WS_BASE}/ws/market/${symbol}`);
+    ws = new WebSocket(`${WS_BASE}${wsPath}`);
     ws.onmessage = (ev) => {
       try {
         onTick(JSON.parse(ev.data));
@@ -244,4 +272,36 @@ export function subscribeMarket(symbol, onTick, onStatusChange) {
     closedByCaller = true;
     ws && ws.close();
   };
+}
+
+export function subscribeMarket(symbol, onTick, onStatusChange) {
+  return _subscribeWs(`/ws/market/${symbol}`, onTick, onStatusChange);
+}
+
+// Live-mode equivalent, backed by a real Angel One SmartWebSocketV2 feed
+// (see app/routers/live_market.py). Same tick payload shape (type/symbol/
+// price/best_bid/best_ask/bids/asks/sent_at) as subscribeMarket's own --
+// best_bid/best_ask/bids/asks always come through as null/[] here (a live
+// LTP-mode tick has no real order-book depth to report, the same "nothing
+// fabricated" convention the simulated feed uses for a derived index's
+// own missing book). If the connecting user has no complete broker
+// credential, the server closes with code 4400 and a reason string
+// immediately -- that surfaces here as an ordinary reconnect-retry cycle
+// like any other drop, since there's no separate "permanently blocked"
+// status in this module's vocabulary (see subscribeMarket's own comment
+// on why "how long has it been down" is left to the caller's clock, not
+// this function).
+export function subscribeLiveMarket(symbol, onTick, onStatusChange) {
+  return _subscribeWs(`/live/ws/market/${symbol}`, onTick, onStatusChange);
+}
+
+// One switch point for "which feed does this symbol's live price come
+// from right now" -- callers pass whatever useMode() gave them instead of
+// each independently branching on "live" themselves, so paper/virtual/
+// live can never drift into disagreeing about which feed backs a given
+// mode.
+export function subscribeMarketForMode(mode, symbol, onTick, onStatusChange) {
+  return mode === "live"
+    ? subscribeLiveMarket(symbol, onTick, onStatusChange)
+    : subscribeMarket(symbol, onTick, onStatusChange);
 }

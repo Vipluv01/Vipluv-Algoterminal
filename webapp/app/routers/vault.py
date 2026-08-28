@@ -39,6 +39,15 @@ class CredentialIn(BaseModel):
     api_key: str
     api_secret: str
     access_token: str | None = None
+    # Both needed for a real SmartAPI (Angel One) login -- see
+    # LiveBrokerCredential's own docstring on why these are separate
+    # columns rather than folded into api_key/api_secret. client_code is
+    # the account/client id; totp_secret is the base32 TOTP seed (from
+    # enabling TOTP in the Angel One app/site), NOT a live 6-digit code --
+    # app/broker/angelone.py generates the current code from this seed at
+    # login time, the seed itself never expires the way a code does.
+    client_code: str | None = None
+    totp_secret: str | None = None
 
 
 class CredentialOut(BaseModel):
@@ -46,6 +55,8 @@ class CredentialOut(BaseModel):
     api_key_last4: str
     api_secret_last4: str
     has_access_token: bool
+    client_code_last4: str | None
+    has_totp_secret: bool
     # "Rotation timestamp" -- LiveBrokerCredential.updated_at, which bumps
     # on every POST (create OR overwrite, via the model's own onupdate=).
     rotated_at: object
@@ -55,14 +66,21 @@ class CredentialOut(BaseModel):
 
 def _to_out(cred: LiveBrokerCredential) -> CredentialOut:
     # Decrypts ONLY to slice the last 4 characters -- the full plaintext
-    # never gets assigned to a field this function returns.
+    # never gets assigned to a field this function returns. The TOTP
+    # secret is never even decrypted here (has_totp_secret is a presence
+    # check, not a last-4 -- a partial TOTP seed is still meaningfully
+    # secret-shaped, unlike an api key/client code where the last 4 chars
+    # are a harmless "which credential is this" hint).
     api_key_plain = crypto.decrypt(cred.encrypted_api_key)
     api_secret_plain = crypto.decrypt(cred.encrypted_api_secret)
+    client_code_last4 = _last4(crypto.decrypt(cred.encrypted_client_code)) if cred.encrypted_client_code else None
     return CredentialOut(
         broker=cred.broker,
         api_key_last4=_last4(api_key_plain),
         api_secret_last4=_last4(api_secret_plain),
         has_access_token=cred.encrypted_access_token is not None,
+        client_code_last4=client_code_last4,
+        has_totp_secret=cred.encrypted_totp_secret is not None,
         rotated_at=cred.updated_at,
     )
 
@@ -82,12 +100,16 @@ def put_credential(body: CredentialIn, user: User = Depends(get_current_user), d
 
     cred = db.query(LiveBrokerCredential).filter(LiveBrokerCredential.user_id == user.id).first()
     encrypted_access_token = crypto.encrypt(body.access_token) if body.access_token else None
+    encrypted_client_code = crypto.encrypt(body.client_code) if body.client_code else None
+    encrypted_totp_secret = crypto.encrypt(body.totp_secret) if body.totp_secret else None
     if cred is None:
         cred = LiveBrokerCredential(
             user_id=user.id, broker=body.broker,
             encrypted_api_key=crypto.encrypt(body.api_key),
             encrypted_api_secret=crypto.encrypt(body.api_secret),
             encrypted_access_token=encrypted_access_token,
+            encrypted_client_code=encrypted_client_code,
+            encrypted_totp_secret=encrypted_totp_secret,
         )
         db.add(cred)
     else:
@@ -99,6 +121,8 @@ def put_credential(body: CredentialIn, user: User = Depends(get_current_user), d
         cred.encrypted_api_key = crypto.encrypt(body.api_key)
         cred.encrypted_api_secret = crypto.encrypt(body.api_secret)
         cred.encrypted_access_token = encrypted_access_token
+        cred.encrypted_client_code = encrypted_client_code
+        cred.encrypted_totp_secret = encrypted_totp_secret
     db.commit()
     db.refresh(cred)
     return _to_out(cred)

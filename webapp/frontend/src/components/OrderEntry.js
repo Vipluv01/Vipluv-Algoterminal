@@ -2,6 +2,7 @@ import React from "react";
 import { html } from "../html.js";
 import { api } from "../api.js";
 import { useToast } from "../toast.js";
+import { OrderModeBanner } from "./OrderModeBanner.js";
 
 // prefill: {side, price, nonce} | undefined -- click-to-trade support.
 // `nonce` (a fresh value, e.g. Date.now(), on every click) is what makes a
@@ -73,8 +74,9 @@ export function OrderEntry({ symbol, price, onOrderPlaced, prefill }) {
   }
 
   return html`
-    <div class="panel panel-pad">
+    <div class="panel panel-pad order-ticket-panel">
       <div class="panel-title">Trade</div>
+      <${OrderModeBanner} />
 
       <div class="toggle-row" style=${{ marginBottom: "8px" }}>
         <button class=${`btn ${side === "buy" ? "active buy" : ""}`} onClick=${() => setSide("buy")}>Buy</button>
