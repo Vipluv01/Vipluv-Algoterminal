@@ -23,10 +23,17 @@ class MarketSnapshot:
     """Recent price history for one instrument, oldest first. `prices`
     should be the SAME mid-price series bourse's simulation/demo already
     produces -- these strategies are meant to run against paper-mode data
-    that came from the real engine, not a separately-simulated series."""
+    that came from the real engine, not a separately-simulated series.
+
+    `volumes`, when provided, is the matching per-bar traded volume series
+    (same length as `prices`) -- optional and defaulted to None because
+    only volume-aware strategies (vwap_reversion) need it; the original 3
+    strategies never reference it, so every existing call site stays valid
+    unchanged."""
 
     symbol: str
     prices: np.ndarray
+    volumes: np.ndarray | None = None
 
 
 @dataclass(frozen=True)

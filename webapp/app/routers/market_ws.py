@@ -10,20 +10,51 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.markets import NAMED_INSTRUMENTS, MarketRegistry
+from app.markets import DERIVED_INDICES, NAMED_INSTRUMENTS, MarketRegistry
 
 router = APIRouter()
 
 # symbol -> set of subscribed websockets. Populated/cleaned up per
 # connection in the handler below; main.py's tick loop reads this after
-# every step_all() to know who to push updates to.
-SUBSCRIBERS: dict[str, set[WebSocket]] = {sym: set() for sym in NAMED_INSTRUMENTS}
+# every step_all() to know who to push updates to. Covers BOTH real
+# instruments and derived indices (NIFTY50/BANKNIFTY) -- a derived index
+# has no SymbolMarket/order book of its own (see _tick_payload below), but
+# its computed VALUE still streams, the same as GET /symbols already
+# treats it as a first-class, if is_derived=True, symbol.
+SUBSCRIBERS: dict[str, set[WebSocket]] = {sym: set() for sym in (*NAMED_INSTRUMENTS, *DERIVED_INDICES)}
 
 
 def _tick_payload(registry: MarketRegistry, symbol: str) -> dict:
+    # A derived index (NIFTY50/BANKNIFTY) has no SymbolMarket/Engine of its
+    # own -- registry[symbol] would KeyError -- so it has no real best_bid/
+    # best_ask/depth to report either. Streaming its computed price is
+    # honest; fabricating a synthetic order book for it would not be, so
+    # those fields go through as None/empty rather than invented.
+    # Server-stamped at the moment this payload is BUILT (immediately
+    # before it's serialized and sent), in epoch milliseconds -- matching
+    # /market/history's own timestamp convention. The client computes its
+    # own delivery delta (Date.now() - sent_at) rather than this server
+    # trying to guess a network/queueing delay it cannot see; see
+    # app.telemetry's own docstring on measuring the real thing, not a
+    # borrowed or estimated one.
+    sent_at = int(time.time() * 1000)
+
+    if symbol in DERIVED_INDICES:
+        return {
+            "type": "tick",
+            "symbol": symbol,
+            "price": registry.current_prices()[symbol],
+            "best_bid": None,
+            "best_ask": None,
+            "bids": [],
+            "asks": [],
+            "sent_at": sent_at,
+        }
+
     # Engine.best_bid()/best_ask()/depth() all return prices in integer
     # ticks, not currency -- every one needs *market.tick_size before it
     # means anything to a UI. (market.current_price is already converted,
@@ -42,6 +73,7 @@ def _tick_payload(registry: MarketRegistry, symbol: str) -> dict:
         "best_ask": ask[0] * tick_size if ask else None,
         "bids": [{"px": lvl.px * tick_size, "qty": lvl.qty} for lvl in bids],
         "asks": [{"px": lvl.px * tick_size, "qty": lvl.qty} for lvl in asks],
+        "sent_at": sent_at,
     }
 
 
@@ -68,7 +100,7 @@ async def _safe_send(ws: WebSocket, payload: str) -> None:
 
 @router.websocket("/ws/market/{symbol}")
 async def market_ws(websocket: WebSocket, symbol: str):
-    if symbol not in NAMED_INSTRUMENTS:
+    if symbol not in NAMED_INSTRUMENTS and symbol not in DERIVED_INDICES:
         await websocket.close(code=4404, reason=f"unknown symbol {symbol!r}")
         return
 

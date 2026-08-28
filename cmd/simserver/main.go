@@ -29,7 +29,8 @@ type request struct {
 	Order  *wireOrder      `json:"order,omitempty"`
 	Cancel *wireOrderID    `json:"cancel_id,omitempty"`
 	Depth  *int            `json:"depth,omitempty"`
-	Owner  *uint32         `json:"owner,omitempty"` // "position" op only
+	Owner  *uint32         `json:"owner,omitempty"`    // "position" op only
+	OrderID *wireOrderID   `json:"order_id,omitempty"` // "remaining" op only
 }
 
 type wireConfig struct {
@@ -100,6 +101,22 @@ type response struct {
 	                                                          // swallowed -- a caller that cares about
 	                                                          // the durability guarantee needs to know
 	                                                          // the guarantee just broke for this op
+	// Value carries the result of the single-number query ops (mid, spread,
+	// last_px, remaining), paired with Present to say whether the book had an
+	// answer at all.
+	//
+	// It deliberately has NO omitempty, for the same reason Position below
+	// does not: zero is a legitimate answer for several of these (a remaining
+	// quantity of 0 on a fully-filled order, most obviously), and omitempty
+	// would drop exactly that case from the JSON, producing a KeyError on the
+	// Python side in the one situation the caller most needs to distinguish.
+	// That bug already happened once here with Position; not repeating it.
+	Value int64 `json:"value"`
+	// STPCancels: resting orders cancelled by self-trade prevention. Part of
+	// book.Stats since STP was added, but the "stats" op did not copy it into
+	// the response, so the one number that says whether STP is doing anything
+	// was unreachable from Python.
+	STPCancels uint64 `json:"stp_cancels,omitempty"`
 	// Position deliberately has NO omitempty: a real position of 0
 	// (flat, or an owner who has never traded) is a legitimate, meaningful
 	// value, and omitempty would silently drop it from the response --
@@ -309,6 +326,36 @@ func main() {
 				resp.Asks = append(resp.Asks, wirePriceLevel{int64(l.Px), int64(l.Qty), l.Count})
 			}
 
+		// mid, spread and last_px were all reachable on book.Book but not over
+		// the wire, so sim/bourse_sim/engine.py reconstructed mid() itself
+		// from best_bid/best_ask. That reimplementation is a second definition
+		// of the same quantity, free to drift from the engine's -- and the
+		// simulation's most consequential bug to date (KNOWN_ISSUES #3) was a
+		// mid-price fallback behaving differently than intended.
+		case "mid":
+			px, ok := bk.Mid()
+			resp.OK, resp.Value, resp.Present = true, int64(px), ok
+
+		case "spread":
+			sp, ok := bk.Spread()
+			resp.OK, resp.Value, resp.Present = true, int64(sp), ok
+
+		case "last_px":
+			px, ok := bk.LastPx()
+			resp.OK, resp.Value, resp.Present = true, int64(px), ok
+
+		// remaining answers "is this order still resting, and for how much?"
+		// Without it a caller tracking a resting GTC order can only infer that
+		// from its own fill bookkeeping, which is precisely the kind of
+		// duplicated state the ledger design elsewhere avoids.
+		case "remaining":
+			if req.OrderID == nil {
+				resp.Error = "remaining: missing order_id"
+				break
+			}
+			qty, ok := bk.Remaining(book.OrderID(*req.OrderID))
+			resp.OK, resp.Value, resp.Present = true, int64(qty), ok
+
 		case "position":
 			if req.Owner == nil {
 				resp.Error = "position: missing owner"
@@ -321,6 +368,7 @@ func main() {
 			st := bk.Stats()
 			resp.OK = true
 			resp.Trades, resp.Volume, resp.Live, resp.Sequence = st.Trades, int64(st.Volume), st.LiveOrders, st.Sequence
+			resp.STPCancels = st.STPCancels
 
 		case "check":
 			if err := bk.Check(); err != nil {

@@ -15,6 +15,12 @@ import (
 // contributes well under 1% of the measured batch duration.
 const batchSize = 32
 
+// latencyReportOps is the op count behind every published latency figure.
+// The headline report and the stability sweep share it deliberately: per-op
+// cost rises with book depth, so ranges measured at a different op count would
+// not bracket the numbers in the published table.
+const latencyReportOps = 2_000_000
+
 type latencyResult struct {
 	submit *hdr.Histogram
 	cancel *hdr.Histogram

@@ -26,14 +26,21 @@ jobs:
       - name: fuzz smoke (30s — catches regressions the seed corpus doesn't)
         run: go test ./internal/book/ -fuzz FuzzBook -fuzztime 30s
 
-      - name: benchmark + latency report
-        run: go test ./bench/... -run TestLatencyReport -bench . -benchmem -timeout 5m
+      # The default `go test ./...` above VERIFIES that README.md's Results
+      # section matches the committed results/*.json. It does not regenerate
+      # them: regeneration is opt-in (BOURSE_REGEN=1), because a suite that
+      # rewrites its own expected values fails every second run.
+      - name: benchmark + regenerate reports
+        run: BOURSE_REGEN=1 go test ./bench/... -run Report -bench . -benchmem -timeout 10m
 
-      - name: upload latency report
+      - name: upload measured reports
         uses: actions/upload-artifact@v4
         with:
-          name: latency-report
-          path: results/latency.json
+          name: bench-reports
+          path: |
+            results/latency.json
+            results/throughput.json
+            results/latency_stability.json
 
   docker:
     runs-on: ubuntu-latest

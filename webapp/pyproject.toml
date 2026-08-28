@@ -15,10 +15,26 @@ dependencies = [
     "numpy",
     "scipy",
     "statsmodels",
+    # pandas is imported directly by app/strategies/pairs_cointegration.py.
+    # It was previously present only transitively (via statsmodels), which
+    # means a statsmodels release that drops the dependency would break the
+    # pairs strategy with no change on our side.
+    "pandas",
+    "alembic",
+    "nh3>=0.3.7",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio"]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    # Frontend e2e verification only (tests/e2e/) -- drives the already-
+    # running dev server with a real headless Chromium via Playwright's
+    # Python API, never Node. Not a runtime dependency: nothing under
+    # app/ imports these.
+    "playwright",
+    "pillow",
+]
 
 [build-system]
 requires = ["hatchling"]

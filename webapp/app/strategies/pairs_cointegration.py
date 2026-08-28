@@ -38,7 +38,7 @@ import pandas as pd
 from statsmodels.tsa.stattools import coint
 
 from app.strategies.base import Signal
-from app.strategies.kalman import KalmanHedgeRatio
+from app.strategies.kalman import KalmanBetaAlpha
 
 PairPosition = Literal["none", "long_spread", "short_spread"]
 # long_spread  = long symbol_a, short symbol_b (bet the spread rises back up)
@@ -52,6 +52,15 @@ class PairSnapshot:
     prices_a: np.ndarray
     prices_b: np.ndarray
     position: PairPosition = "none"
+    # The actual held quantity on the A leg when position != "none", 0
+    # otherwise. Optional/defaulted because pairs_cointegration.py below
+    # never needs it (it always sizes with the same fixed self.qty on
+    # both entry and close, so there's nothing to look up) -- but a
+    # strategy whose entry size VARIES (pairs_kelly.py) needs it to close
+    # exactly what it opened, not a fresh size guessed at close time. Same
+    # "caller passes state in, strategy doesn't hide it" discipline this
+    # class's own docstring establishes for `position` itself.
+    position_qty_a: int = 0
 
 
 @dataclass(frozen=True)
@@ -105,11 +114,17 @@ def compute_pair_stats(
     if len(a) < min_history or len(a) != len(b):
         return None
 
-    kf = KalmanHedgeRatio()
+    kf = KalmanBetaAlpha()
     betas = np.empty(len(a))
+    alphas = np.empty(len(a))
     for i in range(len(a)):
-        betas[i] = kf.update(a[i], b[i])
-    spread = a - betas * b
+        betas[i], alphas[i] = kf.update(b[i], a[i])
+    # Spread is the regression RESIDUAL (a - beta*b - alpha), not the raw
+    # a - beta*b: now that the filter tracks an intercept, the residual is
+    # what should actually be mean-reverting around zero, and dropping
+    # alpha here would silently reintroduce the origin-passes-through-zero
+    # assumption the intercept exists to remove.
+    spread = a - (betas * b + alphas)
 
     _, pvalue, _ = coint(a, b)
     correlation = float(np.corrcoef(a, b)[0, 1])
@@ -178,11 +193,12 @@ class PairsCointegrationStrategy:
         # position still needs a real beta to unwind the B leg correctly by
         # (not the equal-quantity bug fixed above), so "not cointegrated
         # anymore" must still be able to size a proper close.
-        kf = KalmanHedgeRatio()
+        kf = KalmanBetaAlpha()
         betas = np.empty(len(a))
+        alphas = np.empty(len(a))
         for i in range(len(a)):
-            betas[i] = kf.update(a[i], b[i])
-        spread = a - betas * b
+            betas[i], alphas[i] = kf.update(b[i], a[i])
+        spread = a - (betas * b + alphas)  # regression residual -- see compute_pair_stats
         beta = float(betas[-1])
 
         # Engle-Granger cointegration test on the FULL available history --
@@ -190,6 +206,21 @@ class PairsCointegrationStrategy:
         # (0.74) as a stand-in for it. Correlated random walks have no
         # stable spread; a low cointegration p-value is the actual evidence
         # a stable, tradeable equilibrium relationship exists at all.
+        #
+        # NOT YET DONE, flagged for a future pass: this should become a
+        # TRAILING window, not the full history -- and for a statistical
+        # reason, not just the O(n^2)-ish per-bar cost (measured: a test
+        # sweep at this went 5.5ms -> 76.2ms -> 499ms as history length
+        # grew, superlinearly). KalmanBetaAlpha exists specifically because
+        # the hedge ratio is time-varying -- that is the whole justification
+        # for a filter over a single OLS fit. Handing coint() the entire
+        # session's history asks it to assume the relationship has been
+        # stationary since the session began, which contradicts the
+        # time-varying-beta premise the filter above already commits to. A
+        # trailing window fixes both at once, and is standard on real pairs
+        # desks for the same reason: a cointegration relationship estimated
+        # over a stale multi-hour window is often statistically WORSE than
+        # one estimated over a recent one, not merely slower to compute.
         _, pvalue, _ = coint(a, b)
         if pvalue > self.coint_pvalue_max:
             # Not cointegrated right now -- force-flat rather than silently

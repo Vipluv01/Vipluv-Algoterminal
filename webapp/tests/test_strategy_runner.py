@@ -11,6 +11,7 @@ from app.db import Base
 from app.markets import MarketRegistry
 from app.models.trading import Mode, Order, OrderStatus, OrderType, Side, StrategyAllocation
 from app.models.user import User
+from app.pairs_service import current_pair_position
 from app.strategies.base import MarketSnapshot, Signal
 
 
@@ -121,7 +122,12 @@ def test_enabled_single_instrument_strategy_that_signals_creates_an_order(db, re
     assert o.strategy_key == "alpha_rsi_ema"
     assert o.symbol == "ICICIBANK"
     assert o.side == Side.buy
-    assert o.qty == 3
+    # NOT 3 (the fake strategy's own hardcoded Signal.qty): single-
+    # instrument order sizing is now real (see test_kelly_sizing.py) and
+    # deliberately overrides whatever qty the strategy's own signal
+    # carried. This allocation never set an explicit weight (defaults to
+    # 0.0), so sizing floors to the minimum tradeable size.
+    assert o.qty == 1
     assert o.status in (OrderStatus.filled, OrderStatus.partially_filled, OrderStatus.submitted)
 
 
@@ -143,7 +149,7 @@ def test_unrecognized_strategy_key_is_skipped_not_raised(db, registry, user):
 
 
 def test_current_pair_position_reads_none_with_no_orders(db, user):
-    assert sr._current_pair_position(db, user.id) == "none"
+    assert current_pair_position(db, user.id) == "none"
 
 
 def test_current_pair_position_reads_long_after_a_filled_buy_on_symbol_a(db, user):
@@ -154,7 +160,7 @@ def test_current_pair_position_reads_long_after_a_filled_buy_on_symbol_a(db, use
         created_at=datetime.now(timezone.utc),
     ))
     db.commit()
-    assert sr._current_pair_position(db, user.id) == "long_spread"
+    assert current_pair_position(db, user.id) == "long_spread"
 
 
 def test_current_pair_position_reads_short_after_a_filled_sell_on_symbol_a(db, user):
@@ -165,7 +171,7 @@ def test_current_pair_position_reads_short_after_a_filled_sell_on_symbol_a(db, u
         created_at=datetime.now(timezone.utc),
     ))
     db.commit()
-    assert sr._current_pair_position(db, user.id) == "short_spread"
+    assert current_pair_position(db, user.id) == "short_spread"
 
 
 def test_pairs_entry_stamps_entry_zscore_on_both_legs(db, registry, user, monkeypatch):
@@ -200,7 +206,7 @@ def test_pairs_close_leaves_entry_zscore_null(db, registry, user, monkeypatch):
     ))
     db.add(StrategyAllocation(user_id=user.id, strategy_key=sr.PAIRS_STRATEGY_KEY, mode=Mode.paper, enabled=True))
     db.commit()
-    assert sr._current_pair_position(db, user.id) == "short_spread"
+    assert current_pair_position(db, user.id) == "short_spread"
 
     sr.run_strategies_once(db, registry)
 
@@ -222,4 +228,4 @@ def test_current_pair_position_ignores_orders_from_a_different_strategy(db, user
         created_at=datetime.now(timezone.utc),
     ))
     db.commit()
-    assert sr._current_pair_position(db, user.id) == "none"
+    assert current_pair_position(db, user.id) == "none"

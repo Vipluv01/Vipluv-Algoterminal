@@ -15,6 +15,7 @@ exactly as in test_brackets_api.py.
 import numpy as np
 
 from app.main import app
+from app.pairs_service import refresh_pair_telemetry_once
 
 
 def _cointegrated_pair(n=300, seed=0):
@@ -128,3 +129,101 @@ def test_force_close_flattens_an_open_position(client):
     overview_after = client.get("/pairs/overview").json()
     assert overview_after["position"] == "none"
     assert overview_after["legs"] == {}
+
+
+# --- Stationarity telemetry (ADF / Johansen / Hurst / half-life) --------
+#
+# Computed on the tick cadence (app.pairs_service.refresh_pair_telemetry_once),
+# not per request -- tests call it directly since DISABLE_MARKET_TICK=1
+# means nothing calls it automatically here.
+
+def test_telemetry_is_null_before_any_tick_has_computed_it(client):
+    resp = client.get("/pairs/overview")
+    assert resp.json()["telemetry"] is None
+
+
+def test_telemetry_populates_after_a_refresh_and_carries_interpretation_context(client):
+    _seed_price_history()
+    refresh_pair_telemetry_once(app.state.registry)
+
+    for path in ("/pairs/overview", "/pairs/analytics"):
+        body = client.get(path).json()
+        telemetry = body["telemetry"]
+        assert telemetry is not None, path
+        assert telemetry["n_points"] > 0
+        assert telemetry["age_seconds"] >= 0
+
+        adf = telemetry["adf"]
+        assert isinstance(adf["stat"], float)
+        assert isinstance(adf["pvalue"], float)
+        assert set(adf["critical_values"].keys()) == {"1%", "5%", "10%"}
+        assert isinstance(adf["is_stationary"], bool)
+
+        johansen = telemetry["johansen"]
+        assert len(johansen["trace_stats"]) == 2
+        assert len(johansen["critical_values_90"]) == 2
+        assert len(johansen["critical_values_95"]) == 2
+        assert len(johansen["critical_values_99"]) == 2
+
+        assert telemetry["hurst"]["random_walk_reference"] == 0.5
+        assert isinstance(telemetry["hurst"]["value"], float)
+        assert isinstance(telemetry["half_life_bars"], float)
+
+
+def test_telemetry_correctly_identifies_a_deliberately_cointegrated_spread_as_stationary(client):
+    _seed_price_history()  # _cointegrated_pair -- a IS b+5+small_noise, by construction
+    refresh_pair_telemetry_once(app.state.registry)
+
+    telemetry = client.get("/pairs/overview").json()["telemetry"]
+    assert telemetry["adf"]["is_stationary"] is True
+    assert telemetry["adf"]["pvalue"] < 0.05
+    # A deliberately tight, mean-reverting spread should read well below
+    # the H=0.5 random-walk reference, not just "some float."
+    assert telemetry["hurst"]["value"] < 0.5
+
+
+def test_overview_and_analytics_read_the_same_cached_telemetry(client):
+    """Proves this is a shared cache read, not two independent
+    recomputations that could silently drift from each other -- the whole
+    point of computing it once on the tick cadence."""
+    _seed_price_history()
+    refresh_pair_telemetry_once(app.state.registry)
+
+    overview_telemetry = client.get("/pairs/overview").json()["telemetry"]
+    analytics_telemetry = client.get("/pairs/analytics").json()["telemetry"]
+    assert overview_telemetry["computed_at"] == analytics_telemetry["computed_at"]
+    assert overview_telemetry["adf"]["stat"] == analytics_telemetry["adf"]["stat"]
+
+
+def test_telemetry_cache_does_not_leak_across_app_lifespans():
+    """Regression test for a real bug: _pair_telemetry is a module-level
+    global, but each TestClient(app) lifespan creates a FRESH
+    MarketRegistry -- without an explicit reset on startup (app/main.py's
+    lifespan calling reset_pair_telemetry()), a later test would see an
+    earlier test's stale cached telemetry, computed against a registry
+    that no longer exists."""
+    import os
+    os.environ.setdefault("DISABLE_MARKET_TICK", "1")
+    os.environ.setdefault("DISABLE_AUTO_MIGRATE", "1")
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+    from app.db import Base, get_db
+
+    def _fresh_client():
+        engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        SessionLocal = sessionmaker(bind=engine)
+        Base.metadata.create_all(bind=engine)
+        app.dependency_overrides[get_db] = lambda: (yield SessionLocal())
+        return TestClient(app)
+
+    with _fresh_client() as c1:
+        _seed_price_history()
+        refresh_pair_telemetry_once(app.state.registry)
+        assert c1.get("/pairs/overview").json()["telemetry"] is not None
+
+    with _fresh_client() as c2:
+        # A fresh lifespan started -- the previous one's cached telemetry
+        # must NOT still be visible.
+        assert c2.get("/pairs/overview").json()["telemetry"] is None

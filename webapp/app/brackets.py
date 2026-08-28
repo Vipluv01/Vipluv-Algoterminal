@@ -14,7 +14,7 @@ from typing import Literal
 
 from sqlalchemy.orm import Session
 
-from app.markets import MarketRegistry
+from app.markets import HUMAN_USER_OWNER_ID, MarketRegistry
 from app.models.trading import Bracket, BracketStatus, Mode, Order, OrderStatus, OrderType, Side
 
 TriggerKind = Literal["stop_loss", "take_profit"]
@@ -95,7 +95,7 @@ def _close_bracket(db: Session, registry: MarketRegistry, bracket: Bracket, kind
     market = registry[bracket.symbol]
     order_id = market.next_order_id()
     result = market.eng.submit(order_id=order_id, side=closing_side, qty=bracket.qty, px=0,
-                                owner=1, order_type="market", tif="gtc")
+                                owner=HUMAN_USER_OWNER_ID, order_type="market", tif="gtc")
 
     avg_fill_px = None
     if result.filled_qty > 0:

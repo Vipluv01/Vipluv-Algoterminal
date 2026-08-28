@@ -75,3 +75,104 @@ def bollinger_bands(values: np.ndarray, window: int = 20, n_std: float = 2.0) ->
         m, s = w.mean(), w.std(ddof=0)
         mid[i], lower[i], upper[i] = m, m - n_std * s, m + n_std * s
     return lower, mid, upper
+
+
+def sma(prices: list[float] | np.ndarray, period: int) -> np.ndarray:
+    """Simple moving average. NaN before `period` observations exist, same
+    convention as bollinger_bands (its own mid line IS an SMA -- kept
+    separate rather than routed through this function, since bollinger_bands
+    predates this one and there's no live caller needing them coupled)."""
+    values = np.asarray(prices, dtype=float)
+    n = len(values)
+    out = np.full(n, np.nan)
+    for i in range(period - 1, n):
+        out[i] = values[i - period + 1: i + 1].mean()
+    return out
+
+
+def vwap(prices: list[float] | np.ndarray, volumes: list[float] | np.ndarray) -> np.ndarray:
+    """Cumulative (session-to-date) volume-weighted average price:
+    vwap[t] = sum(price[:t+1] * volume[:t+1]) / sum(volume[:t+1]).
+
+    Cumulative, not a rolling window -- this is the conventional definition
+    of VWAP (anchored to session start, e.g. a trading day), distinct from
+    a rolling volume-weighted mean over a fixed lookback. A step with zero
+    volume carries forward the previous value rather than producing NaN or
+    a divide-by-zero: zero volume means nothing traded, so the
+    volume-weighted average price is unchanged by that step, not undefined.
+    """
+    p = np.asarray(prices, dtype=float)
+    v = np.asarray(volumes, dtype=float)
+    if len(p) != len(v):
+        raise ValueError(f"prices and volumes must be the same length, got {len(p)} and {len(v)}")
+
+    cum_pv = np.cumsum(p * v)
+    cum_v = np.cumsum(v)
+    out = np.full(len(p), np.nan)
+    nonzero = cum_v > 0
+    out[nonzero] = cum_pv[nonzero] / cum_v[nonzero]
+    # Forward-fill any leading zero-volume steps: no volume yet means "no
+    # VWAP yet" is honestly NaN (nothing to average), but a zero-volume
+    # step AFTER trading has started should hold the last real VWAP, not
+    # revert to NaN.
+    last_valid = np.nan
+    for i in range(len(out)):
+        if nonzero[i]:
+            last_valid = out[i]
+        elif not np.isnan(last_valid):
+            out[i] = last_valid
+    return out
+
+
+def atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
+    """Average True Range (Wilder's smoothing, same recurrence rsi() uses
+    for its own averages -- an exponential-like running average with
+    smoothing factor 1/period, not a plain rolling mean).
+
+    True range at t is the largest of: high-low, |high - prev_close|,
+    |low - prev_close| -- the second and third terms are what make this
+    different from a plain high-low range, capturing a gap through the
+    previous close as real volatility rather than invisible to the
+    measure. NaN for index 0 (no previous close exists) and for the
+    `period` warm-up, same convention as rsi().
+    """
+    high = np.asarray(high, dtype=float)
+    low = np.asarray(low, dtype=float)
+    close = np.asarray(close, dtype=float)
+    n = len(high)
+    if not (len(low) == len(close) == n):
+        raise ValueError("high, low, and close must be the same length")
+
+    out = np.full(n, np.nan)
+    if n < 2:
+        return out
+
+    true_range = np.full(n, np.nan)
+    true_range[1:] = np.maximum(
+        high[1:] - low[1:],
+        np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])),
+    )
+
+    if n <= period:
+        return out
+
+    # First ATR value is a plain mean of the first `period` true ranges
+    # (indices 1..period, since index 0 has none) -- Wilder's own
+    # convention for seeding the running average, same as rsi()'s
+    # avg_gain/avg_loss seed.
+    out[period] = true_range[1: period + 1].mean()
+    for i in range(period + 1, n):
+        out[i] = (out[i - 1] * (period - 1) + true_range[i]) / period
+    return out
+
+
+def bollinger_bandwidth(prices: list[float] | np.ndarray, period: int = 20, num_std: float = 2.0) -> np.ndarray:
+    """Normalized band width: (upper - lower) / mid -- a squeeze/expansion
+    measure, not the bands themselves. A falling bandwidth is the textbook
+    "volatility contraction, breakout likely soon" signal bb_squeeze
+    (Phase 3's new strategy) watches for; the raw bands alone don't
+    directly expose that as a single comparable number across time."""
+    lower, mid, upper = bollinger_bands(np.asarray(prices, dtype=float), window=period, n_std=num_std)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        bandwidth = np.where(mid != 0, (upper - lower) / mid, np.nan)
+    return bandwidth

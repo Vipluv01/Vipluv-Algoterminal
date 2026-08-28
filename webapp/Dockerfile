@@ -25,9 +25,13 @@ RUN go build -o /out/simserver ./cmd/simserver
 FROM python:3.12-slim
 WORKDIR /app
 
+# Keep in step with webapp/pyproject.toml's [project].dependencies.
+# pandas is explicit: app/strategies/pairs_cointegration.py imports it
+# directly and must not rely on statsmodels continuing to pull it in.
+# alembic is required at startup -- app/main.py's lifespan runs migrations.
 RUN pip install --no-cache-dir \
     fastapi "uvicorn[standard]" sqlalchemy authlib httpx python-dotenv \
-    itsdangerous cryptography numpy scipy statsmodels
+    itsdangerous cryptography numpy scipy statsmodels pandas alembic nh3
 
 # Repo-root-relative layout, matching local dev exactly:
 #   /app/bin/simserver         <- app/markets.py + engine.py's find_simserver_binary()
@@ -38,6 +42,10 @@ COPY --from=gobuild /out/simserver ./bin/simserver
 COPY sim/bourse_sim ./sim/bourse_sim
 COPY webapp/app ./webapp/app
 COPY webapp/frontend ./webapp/frontend
+# Migrations build the schema on boot (app/migrate.py). Without these the
+# container starts against an empty database and every query 500s.
+COPY webapp/alembic ./webapp/alembic
+COPY webapp/alembic.ini ./webapp/alembic.ini
 
 WORKDIR /app/webapp
 ENV HOST=0.0.0.0

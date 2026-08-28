@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.accounting import compute_account, compute_equity_curve, compute_realizations
+from app.accounting import compute_account, compute_equity_curve, compute_realized_pnl_curve, compute_realizations
 from app.models.trading import Mode, Order, OrderStatus, OrderType, Side
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -141,32 +141,32 @@ def test_compute_realizations_records_one_event_per_closing_fill():
     assert all(e.symbol == "TCS" for e in events)
 
 
-def test_compute_equity_curve_is_empty_with_no_orders():
-    assert compute_equity_curve([]) == []
+def test_compute_realized_pnl_curve_is_empty_with_no_orders():
+    assert compute_realized_pnl_curve([]) == []
 
 
-def test_compute_equity_curve_has_one_point_per_fill_including_non_realizing_ones():
+def test_compute_realized_pnl_curve_has_one_point_per_fill_including_non_realizing_ones():
     orders = [
         _order("TCS", Side.buy, 10, 4000.0, minutes_after_t0=0),   # opens -- no realization yet
         _order("TCS", Side.sell, 4, 4300.0, minutes_after_t0=1),   # realizes a win
     ]
-    curve = compute_equity_curve(orders, starting_cash=100_000.0)
+    curve = compute_realized_pnl_curve(orders, starting_cash=100_000.0)
     assert len(curve) == 2, "a point per FILL, not just per realizing fill -- the curve must show flat stretches while a position is only being built, not skip them"
-    assert curve[0].equity == pytest.approx(100_000.0), "opening a position doesn't change realized equity yet"
-    assert curve[1].equity == pytest.approx(100_000.0 + 4 * (4300.0 - 4000.0))
+    assert curve[0].realized_pnl == pytest.approx(100_000.0), "opening a position doesn't change realized P&L yet"
+    assert curve[1].realized_pnl == pytest.approx(100_000.0 + 4 * (4300.0 - 4000.0))
 
 
-def test_compute_equity_curve_is_chronological_regardless_of_input_order():
+def test_compute_realized_pnl_curve_is_chronological_regardless_of_input_order():
     orders = [
         _order("TCS", Side.sell, 10, 4300.0, minutes_after_t0=1),
         _order("TCS", Side.buy, 10, 4000.0, minutes_after_t0=0),
     ]
-    curve = compute_equity_curve(orders, starting_cash=100_000.0)
+    curve = compute_realized_pnl_curve(orders, starting_cash=100_000.0)
     assert curve[0].created_at < curve[1].created_at
-    assert curve[-1].equity == pytest.approx(100_000.0 + 10 * (4300.0 - 4000.0))
+    assert curve[-1].realized_pnl == pytest.approx(100_000.0 + 10 * (4300.0 - 4000.0))
 
 
-def test_compute_equity_curve_matches_total_realized_pnl_at_the_final_point():
+def test_compute_realized_pnl_curve_matches_total_realized_pnl_at_the_final_point():
     """The whole point of this curve: its LAST value must equal
     starting_cash + total realized P&L, exactly what compute_account
     reports separately -- two views of the same walk that must agree,
@@ -178,8 +178,121 @@ def test_compute_equity_curve_matches_total_realized_pnl_at_the_final_point():
         _order("TCS", Side.buy, 5, 3900.0, minutes_after_t0=3),
     ]
     acc = compute_account(orders, current_prices={"RELIANCE": 3000.0, "TCS": 3900.0}, starting_cash=1_000_000.0)
-    curve = compute_equity_curve(orders, starting_cash=1_000_000.0)
-    assert curve[-1].equity == pytest.approx(1_000_000.0 + acc.total_realized_pnl)
+    curve = compute_realized_pnl_curve(orders, starting_cash=1_000_000.0)
+    assert curve[-1].realized_pnl == pytest.approx(1_000_000.0 + acc.total_realized_pnl)
+
+
+def test_compute_realized_pnl_curve_ignores_pending_and_cancelled_orders():
+    orders = [
+        _order("TCS", Side.buy, 10, 4000.0, status=OrderStatus.pending_confirmation),
+        _order("TCS", Side.buy, 5, 4000.0, status=OrderStatus.cancelled),
+    ]
+    assert compute_realized_pnl_curve(orders, starting_cash=100_000.0) == []
+
+
+# --- compute_equity_curve: genuine mark-to-market, using an injected
+# PriceLookup (not a real MarketRegistry -- app/routers/account.py wires
+# the real one from SymbolMarket.price_history; these tests only need to
+# prove the WALK computes mark-to-market correctly from whatever a lookup
+# returns).
+
+def _fixed_price(prices: dict[str, float]):
+    """A PriceLookup that ignores the timestamp and always returns each
+    symbol's current price -- for tests where "the price never moved"
+    is exactly the scenario, so the equity curve's per-fill mark should
+    equal compute_account's own total_value once all orders are in."""
+    def lookup(symbol, at):
+        return prices.get(symbol)
+    return lookup
+
+
+def test_compute_equity_curve_is_empty_with_no_orders():
+    assert compute_equity_curve([], price_lookup=_fixed_price({})) == []
+
+
+def test_compute_equity_curve_marks_an_open_position_at_the_looked_up_price_not_realized_pnl():
+    """The bug this whole fix is for: an OPEN position must move the
+    curve by its unrealized P&L, not sit flat at starting_cash the way
+    the realized-only curve does."""
+    orders = [_order("TCS", Side.buy, 10, 4000.0, minutes_after_t0=0)]
+    curve = compute_equity_curve(orders, price_lookup=_fixed_price({"TCS": 4300.0}), starting_cash=100_000.0)
+    assert len(curve) == 1
+    # cash after the buy (100_000 - 40_000) + 10 * mark (4300) == 103_000,
+    # NOT 100_000 (what the realized-only curve would show for this
+    # still-open position).
+    assert curve[0].equity == pytest.approx(100_000.0 - 10 * 4000.0 + 10 * 4300.0)
+
+
+def test_compute_equity_curve_moves_with_the_looked_up_price_between_fills():
+    """Same order, two different marks at two different timestamps
+    (simulating price_history moving between fills) -- the curve must
+    track each fill's own mark, not freeze at the first one."""
+    orders = [
+        _order("TCS", Side.buy, 10, 4000.0, minutes_after_t0=0),
+        _order("TCS", Side.buy, 10, 4000.0, minutes_after_t0=1),
+    ]
+
+    def lookup(symbol, at):
+        # Distinguish the two fills by their own created_at.
+        return 4100.0 if at == T0 else 4400.0
+
+    curve = compute_equity_curve(orders, price_lookup=lookup, starting_cash=100_000.0)
+    assert len(curve) == 2
+    assert curve[0].equity == pytest.approx(100_000.0 - 10 * 4000.0 + 10 * 4100.0)
+    assert curve[1].equity == pytest.approx(100_000.0 - 20 * 4000.0 + 20 * 4400.0)
+    assert curve[0].equity != curve[1].equity, "a real price move between fills must move the curve"
+
+
+def test_compute_equity_curve_falls_back_to_avg_entry_price_when_the_lookup_has_no_history():
+    """A symbol the lookup can't mark (e.g. a synthetic option contract
+    with no price_history) falls back to that position's own average
+    entry price -- the same honest fallback compute_account already uses
+    for current_prices, not a fabricated mark."""
+    orders = [_order("XYZ_OPT", Side.buy, 10, 50.0, minutes_after_t0=0)]
+    curve = compute_equity_curve(orders, price_lookup=_fixed_price({}), starting_cash=100_000.0)
+    assert curve[0].equity == pytest.approx(100_000.0), "marked at its own avg entry price -- no gain, no loss"
+
+
+def test_compute_equity_curve_matches_total_value_once_flat_and_the_price_is_static():
+    """At the final point of a fully-closed round trip, mark-to-market
+    and realized-only must agree exactly -- there's no open position left
+    for mark-to-market to disagree about."""
+    orders = [
+        _order("RELIANCE", Side.buy, 10, 2900.0, minutes_after_t0=0),
+        _order("RELIANCE", Side.sell, 10, 3000.0, minutes_after_t0=1),
+    ]
+    acc = compute_account(orders, current_prices={"RELIANCE": 3000.0}, starting_cash=1_000_000.0)
+    curve = compute_equity_curve(orders, price_lookup=_fixed_price({"RELIANCE": 3000.0}), starting_cash=1_000_000.0)
+    assert curve[-1].equity == pytest.approx(acc.total_value)
+
+
+def test_compute_equity_curve_matches_total_value_with_an_open_position_too():
+    """Not just the flat/closed case: at the LATEST point, mark-to-market
+    equity must equal compute_account's total_value even with a position
+    still open -- this is the exact disagreement the bug report described
+    (100,000 vs 100,500 at the identical instant)."""
+    orders = [_order("RELIANCE", Side.buy, 10, 2900.0, minutes_after_t0=0)]
+    acc = compute_account(orders, current_prices={"RELIANCE": 2950.0}, starting_cash=100_000.0)
+    curve = compute_equity_curve(orders, price_lookup=_fixed_price({"RELIANCE": 2950.0}), starting_cash=100_000.0)
+    assert curve[-1].equity == pytest.approx(acc.total_value)
+    assert curve[-1].equity != pytest.approx(100_000.0), "an open position must move the curve away from starting cash"
+
+
+def test_compute_equity_curve_still_realizes_correctly_through_a_flip_through_flat():
+    """Same flip-through-flat scenario as
+    test_flipping_through_flat_realizes_against_the_old_side_and_opens_the_new_one
+    above -- the mark-to-market path must reuse the same weighted-avg-cost
+    walk, not a second, divergent implementation."""
+    orders = [
+        _order("SBIN", Side.buy, 10, 800.0, minutes_after_t0=0),
+        _order("SBIN", Side.sell, 15, 820.0, minutes_after_t0=1),  # closes the 10 long, opens 5 short
+    ]
+    curve = compute_equity_curve(orders, price_lookup=_fixed_price({"SBIN": 820.0}), starting_cash=1_000_000.0)
+    # After the flip: cash moved by (-10*800 + 15*820) = 4300; the
+    # resulting 5-short position is marked at 820, the same price it
+    # opened at, so it contributes 0 unrealized on top of that.
+    assert curve[-1].equity == pytest.approx(1_000_000.0 - 10 * 800.0 + 15 * 820.0 + (-5) * 820.0)
+    assert curve[-1].equity == pytest.approx(1_000_000.0 + 10 * (820.0 - 800.0))
 
 
 def test_compute_equity_curve_ignores_pending_and_cancelled_orders():
@@ -187,7 +300,7 @@ def test_compute_equity_curve_ignores_pending_and_cancelled_orders():
         _order("TCS", Side.buy, 10, 4000.0, status=OrderStatus.pending_confirmation),
         _order("TCS", Side.buy, 5, 4000.0, status=OrderStatus.cancelled),
     ]
-    assert compute_equity_curve(orders, starting_cash=100_000.0) == []
+    assert compute_equity_curve(orders, price_lookup=_fixed_price({}), starting_cash=100_000.0) == []
 
 
 def test_compute_realizations_matches_compute_accounts_total(monkeypatch):

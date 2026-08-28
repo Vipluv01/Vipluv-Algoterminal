@@ -13,14 +13,25 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.brackets import monitor_brackets
-from app.db import Base, SessionLocal, engine
+from app.db import SessionLocal
+from app.execution.slicer import run_algo_orders_once
+from app.migrate import run_migrations
 from app.markets import MarketRegistry
-from app.routers import account, dashboard, market_ws, optimizer, orders, pairs, risk, strategies
+from app.pairs_service import refresh_pair_telemetry_once, reset_pair_telemetry
+from app.telemetry import reset_order_submit_latencies
+from app.risk.circuit_breaker import run_circuit_breakers_once
+from app.routers import (
+    account, dashboard, journal, leaderboard, market, market_ws, optimizer, options, orders, pairs, portfolio,
+    risk, strategies, telemetry, vault,
+)
 from app.strategy_runner import run_strategies_once
 
 MARKET_TICK_SECONDS = 1.0
@@ -48,6 +59,11 @@ async def _tick_loop(registry: MarketRegistry) -> None:
         db = SessionLocal()
         try:
             run_strategies_once(db, registry)
+            # Advances every active TWAP/VWAP parent order by one bar --
+            # alongside strategy signals, not gated behind them, since an
+            # algo order's schedule is driven by elapsed bars, not by
+            # whether any strategy happened to fire this tick.
+            run_algo_orders_once(db, registry)
             # A bracket-protected position closed some other way (a manual
             # order, a different strategy on the same symbol) has its
             # bracket cancelled at the moment that fill happens -- see
@@ -56,17 +72,27 @@ async def _tick_loop(registry: MarketRegistry) -> None:
             # places a fill can occur. monitor_brackets only ever sees
             # brackets that are still genuinely watching an intact position.
             monitor_brackets(db, registry)
+            # After strategies/brackets, not before: the breaker needs to
+            # see whatever P&L this tick's own fills just produced, not
+            # last tick's state.
+            run_circuit_breakers_once(db, registry)
         finally:
             db.close()
+        # No db session needed -- pure statistics over price history, same
+        # reasoning as why this runs on the tick cadence at all (see
+        # refresh_pair_telemetry_once's own docstring).
+        refresh_pair_telemetry_once(registry)
         await market_ws.broadcast_ticks(registry)
         await asyncio.sleep(MARKET_TICK_SECONDS)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
+    run_migrations()
     registry = MarketRegistry()
     app.state.registry = registry
+    reset_pair_telemetry()
+    reset_order_submit_latencies()
     tick_task = None if DISABLE_MARKET_TICK else asyncio.create_task(_tick_loop(registry))
     try:
         yield
@@ -85,7 +111,30 @@ app = FastAPI(title="algoterminal", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=False,
     allow_methods=["*"], allow_headers=["*"],
+    # Response headers are NOT readable cross-origin by default regardless
+    # of allow_headers (that governs REQUEST headers) -- GET /orders' real
+    # total count travels in X-Total-Count specifically so the frontend,
+    # on a different origin (:5173 vs this server's :8001), can read it.
+    expose_headers=["X-Total-Count"],
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_without_echoing_vault_input(request: Request, exc: RequestValidationError):
+    """FastAPI's DEFAULT validation-error handler echoes the raw submitted
+    value back in each error's "input" field -- fine for an order qty or a
+    strategy key, but under /vault a malformed request body (e.g. a
+    non-string api_key/api_secret) would otherwise reflect a secret-shaped
+    value straight into a 422 response. Stripped ONLY for /vault paths --
+    verified directly (grepping the actual response text, not just
+    reasoning about it) in tests/test_vault_api.py -- every other route's
+    error shape is untouched, going through FastAPI's own default handler
+    exactly as before.
+    """
+    if request.url.path.startswith("/vault"):
+        errors = [{k: v for k, v in err.items() if k != "input"} for err in exc.errors()]
+        return JSONResponse(status_code=422, content={"detail": errors})
+    return await request_validation_exception_handler(request, exc)
 
 app.include_router(orders.router)
 app.include_router(account.router)
@@ -95,6 +144,13 @@ app.include_router(market_ws.router)
 app.include_router(risk.router)
 app.include_router(pairs.router)
 app.include_router(optimizer.router)
+app.include_router(options.router)
+app.include_router(journal.router)
+app.include_router(market.router)
+app.include_router(portfolio.router)
+app.include_router(vault.router)
+app.include_router(leaderboard.router)
+app.include_router(telemetry.router)
 
 
 @app.get("/healthz")
@@ -104,8 +160,17 @@ def healthz():
 
 @app.get("/symbols")
 def list_symbols():
-    from app.markets import NAMED_INSTRUMENTS
-    return [{"symbol": s, "reference_price": p} for s, p in NAMED_INSTRUMENTS.items()]
+    from app.markets import DERIVED_INDICES, NAMED_INSTRUMENTS, compute_derived_index
+    symbols = [{"symbol": s, "reference_price": p, "is_derived": False} for s, p in NAMED_INSTRUMENTS.items()]
+    # reference_price for a derived index is computed from the SAME static
+    # NAMED_INSTRUMENTS reference prices its constituents use above --
+    # illustrative, not a live quote, same convention as every other
+    # reference_price this endpoint already returns.
+    symbols.extend(
+        {"symbol": s, "reference_price": compute_derived_index(s, NAMED_INSTRUMENTS), "is_derived": True}
+        for s in DERIVED_INDICES
+    )
+    return symbols
 
 
 # Serves the frontend on the SAME port/process as the API -- required for

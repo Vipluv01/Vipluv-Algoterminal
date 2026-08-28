@@ -1,0 +1,119 @@
+{
+  "generated_at": "2026-08-26T13:49:44Z",
+  "reps": 5,
+  "ops_per_rep": 2000000,
+  "submit": {
+    "p50": {
+      "min": 75,
+      "median": 79,
+      "max": 83,
+      "ratio_max_min": 1.1066666666666667
+    },
+    "p90": {
+      "min": 88,
+      "median": 91,
+      "max": 101,
+      "ratio_max_min": 1.1477272727272727
+    },
+    "p99": {
+      "min": 108,
+      "median": 115,
+      "max": 188,
+      "ratio_max_min": 1.7407407407407407
+    },
+    "p999": {
+      "min": 294,
+      "median": 328,
+      "max": 580,
+      "ratio_max_min": 1.9727891156462585
+    },
+    "p9999": {
+      "min": 628,
+      "median": 1400,
+      "max": 3072,
+      "ratio_max_min": 4.89171974522293
+    },
+    "max": {
+      "min": 2084,
+      "median": 3337,
+      "max": 5375,
+      "ratio_max_min": 2.5791746641074855
+    }
+  },
+  "cancel": {
+    "p50": {
+      "min": 19,
+      "median": 19,
+      "max": 20,
+      "ratio_max_min": 1.0526315789473684
+    },
+    "p90": {
+      "min": 22,
+      "median": 22,
+      "max": 24,
+      "ratio_max_min": 1.0909090909090908
+    },
+    "p99": {
+      "min": 26,
+      "median": 26,
+      "max": 67,
+      "ratio_max_min": 2.576923076923077
+    },
+    "p999": {
+      "min": 33,
+      "median": 136,
+      "max": 186,
+      "ratio_max_min": 5.636363636363637
+    },
+    "p9999": {
+      "min": 229,
+      "median": 398,
+      "max": 2992,
+      "ratio_max_min": 13.065502183406114
+    },
+    "max": {
+      "min": 253,
+      "median": 458,
+      "max": 6285,
+      "ratio_max_min": 24.841897233201582
+    }
+  },
+  "sweep": {
+    "p50": {
+      "min": 119,
+      "median": 122,
+      "max": 128,
+      "ratio_max_min": 1.0756302521008403
+    },
+    "p90": {
+      "min": 167,
+      "median": 171,
+      "max": 177,
+      "ratio_max_min": 1.0598802395209581
+    },
+    "p99": {
+      "min": 200,
+      "median": 253,
+      "max": 394,
+      "ratio_max_min": 1.97
+    },
+    "p999": {
+      "min": 458,
+      "median": 500,
+      "max": 1144,
+      "ratio_max_min": 2.497816593886463
+    },
+    "p9999": {
+      "min": 1800,
+      "median": 2656,
+      "max": 4000,
+      "ratio_max_min": 2.2222222222222223
+    },
+    "max": {
+      "min": 19027,
+      "median": 19968,
+      "max": 25378,
+      "ratio_max_min": 1.333788826404583
+    }
+  }
+}

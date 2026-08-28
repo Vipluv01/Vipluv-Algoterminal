@@ -1,0 +1,76 @@
+{
+  "generated_at": "2026-08-26T13:49:42Z",
+  "headline": {
+    "n_operations": 27000000,
+    "n_submits": 15663205,
+    "n_cancels": 11336795,
+    "elapsed_ns": 5947648292,
+    "ns_per_op": 220.28327007407407,
+    "ops_per_second": 4539609.384152199,
+    "bytes_per_op": 4.413667555555556,
+    "allocs_per_op": 5.925925925925926e-7,
+    "total_mallocs": 16,
+    "live_orders_at_end": 2255203,
+    "capacity": 8388608,
+    "saturated": false
+  },
+  "scaling": [
+    {
+      "n_operations": 900000,
+      "n_submits": 522167,
+      "n_cancels": 377833,
+      "elapsed_ns": 129691375,
+      "ns_per_op": 144.1015277777778,
+      "ops_per_second": 6939551.685684573,
+      "bytes_per_op": 3.5134577777777776,
+      "allocs_per_op": 0.000013333333333333333,
+      "total_mallocs": 12,
+      "live_orders_at_end": 74391,
+      "capacity": 8388608,
+      "saturated": false
+    },
+    {
+      "n_operations": 4500000,
+      "n_submits": 2610595,
+      "n_cancels": 1889405,
+      "elapsed_ns": 867666917,
+      "ns_per_op": 192.81487044444444,
+      "ops_per_second": 5186321.976593237,
+      "bytes_per_op": 4.349045333333334,
+      "allocs_per_op": 0.000002666666666666667,
+      "total_mallocs": 12,
+      "live_orders_at_end": 375193,
+      "capacity": 8388608,
+      "saturated": false
+    },
+    {
+      "n_operations": 9000000,
+      "n_submits": 5221210,
+      "n_cancels": 3778790,
+      "elapsed_ns": 1953822167,
+      "ns_per_op": 217.09135188888888,
+      "ops_per_second": 4606355.7635949375,
+      "bytes_per_op": 4.288970666666667,
+      "allocs_per_op": 0.0000014444444444444445,
+      "total_mallocs": 13,
+      "live_orders_at_end": 746792,
+      "capacity": 8388608,
+      "saturated": false
+    },
+    {
+      "n_operations": 27000000,
+      "n_submits": 15663205,
+      "n_cancels": 11336795,
+      "elapsed_ns": 5947648292,
+      "ns_per_op": 220.28327007407407,
+      "ops_per_second": 4539609.384152199,
+      "bytes_per_op": 4.413667555555556,
+      "allocs_per_op": 5.925925925925926e-7,
+      "total_mallocs": 16,
+      "live_orders_at_end": 2255203,
+      "capacity": 8388608,
+      "saturated": false
+    }
+  ],
+  "note": "Throughput is reported against a stated book depth because it is not constant: cost per operation rises as resting-order count grows. Quoting a single unqualified ops/sec figure hides that. The headline row is the largest measured run, i.e. the most conservative."
+}
