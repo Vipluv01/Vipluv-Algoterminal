@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.db
+*.db-shm
+*.db-wal
 .env
 # e2e diff output and ad-hoc captures are generated build artifacts, not
 # source -- screenshots/baseline/ IS tracked: gap2_visual_diff.py's own
