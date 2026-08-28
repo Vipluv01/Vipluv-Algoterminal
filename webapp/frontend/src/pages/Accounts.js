@@ -2,10 +2,23 @@ import React from "react";
 import { html } from "../html.js";
 import { api } from "../api.js";
 import { fmtMoney, pnlClass } from "../format.js";
+import { useMode, setMode, MODE_BLOCKED_REASON } from "../mode.js";
+import { LiveConfirmModal } from "../components/ModeSwitcher.js";
+
+const MODE_ORDER = ["paper", "virtual", "live"];
 
 export function Accounts() {
   const [account, setAccount] = React.useState(null);
   React.useEffect(() => { api.account().then(setAccount); }, []);
+
+  const mode = useMode();
+  const [confirmTarget, setConfirmTarget] = React.useState(null);
+
+  function selectMode(next) {
+    if (next === mode || MODE_BLOCKED_REASON[next]) return;
+    if (next === "live") { setConfirmTarget(next); return; }
+    setMode(next);
+  }
 
   return html`
     <div class="page fade-in">
@@ -16,12 +29,20 @@ export function Accounts() {
         <div class="panel panel-pad">
           <div class="panel-title">Trading Mode</div>
           <div style=${{ display: "flex", gap: "10px" }}>
-            <div class="chip active" style=${{ flex: 1, minWidth: 0, whiteSpace: "normal", textAlign: "center", cursor: "default" }}>
-              <span class="badge badge-live" style=${{ marginRight: "8px" }}>●</span>Paper
-            </div>
-            <div class="chip" style=${{ flex: 1, minWidth: 0, whiteSpace: "normal", textAlign: "center", cursor: "not-allowed", opacity: 0.5 }} title="Requires a connected broker">
-              Live (locked)
-            </div>
+            ${MODE_ORDER.map((m) => {
+              const blocked = MODE_BLOCKED_REASON[m];
+              const active = m === mode;
+              return html`
+                <div key=${m}
+                     class=${`chip ${active ? "active" : ""}`}
+                     style=${{ flex: 1, minWidth: 0, whiteSpace: "normal", textAlign: "center", textTransform: "capitalize", cursor: blocked ? "not-allowed" : "pointer", opacity: blocked ? 0.5 : 1 }}
+                     title=${blocked || undefined}
+                     onClick=${() => selectMode(m)}>
+                  ${active && html`<span class=${`badge badge-mode-${m}`} style=${{ marginRight: "8px" }}>●</span>`}
+                  ${m}${blocked ? " (locked)" : ""}
+                </div>
+              `;
+            })}
           </div>
           <p style=${{ color: "var(--text-dim)", fontSize: "12px", lineHeight: 1.6, marginTop: "14px", marginBottom: 0 }}>
             Every strategy and manual order runs in paper mode against the real bourse matching engine
@@ -29,6 +50,11 @@ export function Accounts() {
             every live order requires explicit human confirmation before it reaches the broker — no
             code path here can place a real trade automatically.
           </p>
+          ${confirmTarget && html`
+            <${LiveConfirmModal}
+              onConfirm=${() => { setMode(confirmTarget); setConfirmTarget(null); }}
+              onClose=${() => setConfirmTarget(null)} />
+          `}
         </div>
 
         <div class="panel panel-pad">

@@ -1,21 +1,49 @@
 import React from "react";
-import { init, dispose } from "klinecharts";
+import { init, dispose, ActionType } from "klinecharts";
 import { html } from "../html.js";
+import { Modal } from "./Modal.js";
+import { SkeletonBlock } from "./Skeleton.js";
+import { api } from "../api.js";
 
-const CANDLE_SECONDS_OPTIONS = { "1s": 1, "5s": 5, "1m": 60, "5m": 300 };
+// 1s/5s were dropped in favor of the two longer timeframes the product
+// actually needs (30m/1hr) -- both of which are USELESS without the
+// history-seeding fetch below, since at one tick/second a 1hr candle would
+// otherwise take a full hour of live watching to draw its first bar. Keys
+// match GET /market/history's own `interval` enum (app/routers/market.py)
+// exactly, since a pane's interval key is sent there verbatim.
+const CANDLE_SECONDS_OPTIONS = { "1m": 60, "5m": 300, "30m": 1800, "1hr": 3600 };
+const DEFAULT_CANDLE_SECONDS = CANDLE_SECONDS_OPTIONS["1m"];
+const HISTORY_BARS = 300;
+
+function secondsToKey(secs) {
+  return Object.entries(CANDLE_SECONDS_OPTIONS).find(([, v]) => v === secs)?.[0];
+}
 
 const MAIN_INDICATORS = ["MA", "EMA", "BOLL", "SAR", "BBI"];
 const SUB_INDICATORS = ["VOL", "MACD", "RSI", "KDJ"];
 
 // Aggregates a stream of {price, timestamp} ticks into OHLCV candles,
 // bucketed by wall-clock time -- klinecharts wants real timestamps, not
-// a tick index, since its x-axis renders actual times.
+// a tick index, since its x-axis renders actual times. Seeded from GET
+// /market/history on mount and on every symbol/interval change, THEN
+// handed off to live ticks -- the seed and the live aggregator bucket
+// timestamps with the exact same formula (bucket = floor(ts_ms /
+// interval_ms), see market.py's _aggregate_bars docstring) specifically so
+// a live tick right after the seed extends the seed's own last bar instead
+// of gapping, duplicating, or misaligning with it.
 function useCandleAggregator(symbol, candleSeconds) {
-  const [ready, setReady] = React.useState(false);
+  const [loading, setLoading] = React.useState(true);
   const candlesRef = React.useRef([]);      // finalized candles
   const currentRef = React.useRef(null);     // in-progress candle
-  const bucketStartRef = React.useRef(0);
+  const bucketStartRef = React.useRef(0);    // bucket NUMBER (not ms) of currentRef/the last-seen bucket
   const chartApiRef = React.useRef(null);    // set by the chart once mounted
+
+  const applyToChart = React.useCallback(() => {
+    const chart = chartApiRef.current;
+    if (!chart) return;
+    const all = currentRef.current ? [...candlesRef.current, currentRef.current] : candlesRef.current;
+    chart.applyNewData(all);
+  }, []);
 
   const onTick = React.useCallback((price) => {
     const now = Date.now();
@@ -39,65 +67,127 @@ function useCandleAggregator(symbol, candleSeconds) {
     if (chartApiRef.current) {
       chartApiRef.current.updateData({ ...currentRef.current });
     }
-    setReady(true);
   }, [candleSeconds]);
 
   const seedChart = React.useCallback((chart) => {
     chartApiRef.current = chart;
-    const all = currentRef.current ? [...candlesRef.current, currentRef.current] : candlesRef.current;
-    if (all.length) chart.applyNewData(all);
-  }, []);
+    applyToChart();
+  }, [applyToChart]);
 
-  // Reset aggregation whenever the symbol OR the candle bucket size
-  // changes -- a 1m candle series built out of 5s-bucketed data (or a new
-  // instrument's ticks) would just be wrong, not merely coarser.
+  // Reset local aggregation AND re-seed from real history whenever the
+  // symbol OR the candle bucket size changes -- a 1m candle series built
+  // out of leftover 5m-bucketed local state (or a new instrument's ticks)
+  // would just be wrong, not merely coarser.
   React.useEffect(() => {
+    let cancelled = false;
     candlesRef.current = [];
     currentRef.current = null;
     bucketStartRef.current = 0;
-    setReady(false);
+    setLoading(true);
+
+    const intervalKey = secondsToKey(candleSeconds);
+    api.market.history(symbol, intervalKey, HISTORY_BARS)
+      .then((hist) => {
+        if (cancelled) return;
+        const bars = hist.bars.map((b) => ({
+          timestamp: b.timestamp, open: b.open, high: b.high, low: b.low, close: b.close,
+          // A bar older than the retained volume window genuinely has no
+          // real traded quantity on file (see BarOut.volume's own
+          // docstring) -- 0 here is a chart-rendering fallback for "not
+          // retained", not a claim that nothing traded; there's no honest
+          // non-zero number to put in its place, and leaving this
+          // undefined breaks klinecharts' VOL pane.
+          volume: b.volume ?? 0,
+        }));
+        const nowBucket = Math.floor(Date.now() / (candleSeconds * 1000));
+        const lastBucket = bars.length ? Math.floor(bars[bars.length - 1].timestamp / (candleSeconds * 1000)) : null;
+        if (lastBucket === nowBucket) {
+          // The newest historical bar IS the current, still-forming bucket
+          // -- treat it as the in-progress candle so the next live tick
+          // EXTENDS it instead of creating a duplicate at the same
+          // timestamp.
+          currentRef.current = bars[bars.length - 1];
+          candlesRef.current = bars.slice(0, -1);
+          bucketStartRef.current = nowBucket;
+        } else {
+          // Nothing has traded in the current bucket yet -- every returned
+          // bar is finalized, and bucketStartRef is set to the last real
+          // bucket seen (not `nowBucket`) so the next live tick correctly
+          // reads as a NEW bucket rather than silently reopening a bar
+          // that was already closed.
+          candlesRef.current = bars;
+          currentRef.current = null;
+          bucketStartRef.current = lastBucket ?? 0;
+        }
+        applyToChart();
+      })
+      .catch(() => {
+        // Seed failed -- fall back to an honestly empty chart (refs are
+        // already reset above) rather than leaving the PREVIOUS symbol's/
+        // interval's stale bars on screen once the loading skeleton lifts.
+        applyToChart();
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, candleSeconds]);
 
-  return { onTick, seedChart, ready };
+  return { onTick, seedChart, loading };
 }
 
+// The first consumer of the generic Modal primitive -- was its own bespoke
+// backdrop+panel (no focus trap, no Escape handling, no restore-focus-on-
+// close) before Modal.js existed to provide all three for free.
 function IndicatorPicker({ active, onToggle, onClose }) {
   return html`
-    <div class="indicator-picker-backdrop" onClick=${onClose}>
-      <div class="indicator-picker" onClick=${(e) => e.stopPropagation()}>
-        <div class="indicator-picker-header">
-          <span>Indicators</span>
-          <button class="btn btn-sm btn-ghost" onClick=${onClose}>✕</button>
-        </div>
-        <div class="indicator-picker-section">Main (overlay)</div>
-        ${MAIN_INDICATORS.map((name) => html`
-          <label key=${name} class="indicator-picker-row">
-            <input type="checkbox" checked=${active.has(name)} onChange=${() => onToggle(name, "candle_pane")} />
-            ${name}
-          </label>
-        `)}
-        <div class="indicator-picker-section">Sub (own pane)</div>
-        ${SUB_INDICATORS.map((name) => html`
-          <label key=${name} class="indicator-picker-row">
-            <input type="checkbox" checked=${active.has(name)} onChange=${() => onToggle(name, null)} />
-            ${name}
-          </label>
-        `)}
-      </div>
-    </div>
+    <${Modal} title="Indicators" onClose=${onClose} size="sm">
+      <div class="indicator-picker-section" style=${{ marginTop: 0 }}>Main (overlay)</div>
+      ${MAIN_INDICATORS.map((name) => html`
+        <label key=${name} class="indicator-picker-row">
+          <input type="checkbox" checked=${active.has(name)} onChange=${() => onToggle(name, "candle_pane")} />
+          ${name}
+        </label>
+      `)}
+      <div class="indicator-picker-section">Sub (own pane)</div>
+      ${SUB_INDICATORS.map((name) => html`
+        <label key=${name} class="indicator-picker-row">
+          <input type="checkbox" checked=${active.has(name)} onChange=${() => onToggle(name, null)} />
+          ${name}
+        </label>
+      `)}
+    <//>
   `;
 }
 
-export function CandleChart({ symbol, price, height = "440px" }) {
+export function CandleChart({ symbol, price, height = "440px", stale = false, onCrosshairMove, syncCrosshair, initialIntervalKey, onIntervalChange }) {
   const containerId = React.useId().replace(/:/g, "-");
   const wrapRef = React.useRef(null);
   const chartRef = React.useRef(null);
   const paneIdByIndicatorRef = React.useRef({}); // name -> paneId, needed to removeIndicator later
-  const [candleSeconds, setCandleSeconds] = React.useState(CANDLE_SECONDS_OPTIONS["5s"]);
+  // Set right before this pane programmatically moves its OWN crosshair to
+  // match a sibling's (via executeAction below) and cleared right after --
+  // without it, that programmatic move would fire THIS pane's own
+  // subscribeAction callback, which would call onCrosshairMove, which
+  // would tell every OTHER pane to move, including the original sender:
+  // an infinite ping-pong across every synced pane.
+  const applyingExternalSyncRef = React.useRef(false);
+  // initialIntervalKey can be stale (a value persisted to localStorage
+  // before 1s/5s were dropped, e.g. Charts.js's PANES_KEY) -- an unknown
+  // key falls back to DEFAULT_CANDLE_SECONDS rather than producing
+  // `undefined` and silently breaking the aggregator's bucket math.
+  const [candleSeconds, setCandleSecondsRaw] = React.useState(CANDLE_SECONDS_OPTIONS[initialIntervalKey] || DEFAULT_CANDLE_SECONDS);
+  function setCandleSeconds(secs) {
+    setCandleSecondsRaw(secs);
+    if (onIntervalChange) {
+      const key = secondsToKey(secs);
+      if (key) onIntervalChange(key);
+    }
+  }
   const [active, setActive] = React.useState(() => new Set(["MA", "VOL"]));
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const [isFullscreen, setIsFullscreen] = React.useState(false);
-  const { onTick, seedChart } = useCandleAggregator(symbol, candleSeconds);
+  const { onTick, seedChart, loading } = useCandleAggregator(symbol, candleSeconds);
 
   React.useEffect(() => {
     const chart = init(containerId, {
@@ -120,14 +210,39 @@ export function CandleChart({ symbol, price, height = "440px" }) {
 
     const onResize = () => chart.resize();
     window.addEventListener("resize", onResize);
+
+    if (onCrosshairMove) {
+      chart.subscribeAction(ActionType.OnCrosshairChange, (data) => {
+        if (applyingExternalSyncRef.current) return; // see the ref's own comment above
+        if (!data || data.dataIndex === undefined) return;
+        onCrosshairMove(data.dataIndex);
+      });
+    }
+
     return () => {
       window.removeEventListener("resize", onResize);
+      if (onCrosshairMove) chart.unsubscribeAction(ActionType.OnCrosshairChange);
       dispose(containerId);
       chartRef.current = null;
       paneIdByIndicatorRef.current = {};
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol]);
+
+  // Applies an incoming synced crosshair position (a data index broadcast
+  // by a SIBLING pane) to this chart -- see Charts.js for the broadcast
+  // side. null means "no crosshair anywhere right now" (e.g. the mouse
+  // left every pane), which clears this pane's crosshair too.
+  React.useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || syncCrosshair === undefined) return;
+    applyingExternalSyncRef.current = true;
+    try {
+      chart.executeAction(ActionType.OnCrosshairChange, syncCrosshair === null ? {} : { dataIndex: syncCrosshair });
+    } finally {
+      applyingExternalSyncRef.current = false;
+    }
+  }, [syncCrosshair]);
 
   React.useEffect(() => {
     if (price !== null && price !== undefined) onTick(price);
@@ -179,7 +294,14 @@ export function CandleChart({ symbol, price, height = "440px" }) {
         <button class="btn btn-sm btn-ghost" onClick=${() => setPickerOpen(true)}>Indicators</button>
         <button class="btn btn-sm btn-ghost" onClick=${toggleFullscreen}>${isFullscreen ? "Exit Full Screen" : "Full Screen"}</button>
       </div>
-      <div id=${containerId} style=${{ width: "100%", height: isFullscreen ? "calc(100vh - 40px)" : height }} />
+      <div style=${{ position: "relative" }}>
+        <div id=${containerId} class=${stale ? "is-stale" : ""}
+             style=${{ width: "100%", height: isFullscreen ? "calc(100vh - 40px)" : height }} />
+        ${loading && html`
+          <${SkeletonBlock} height=${isFullscreen ? "calc(100vh - 40px)" : height}
+                             style=${{ position: "absolute", inset: 0 }} />
+        `}
+      </div>
       ${pickerOpen && html`<${IndicatorPicker} active=${active} onToggle=${toggleIndicator} onClose=${() => setPickerOpen(false)} />`}
     </div>
   `;

@@ -2,16 +2,29 @@ import React from "react";
 import { html } from "../html.js";
 import { fmtMoney, fmtNum } from "../format.js";
 
-function DepthRows({ levels, side }) {
+// Cumulative resting quantity from best price outward -- same running-
+// total DepthChart already computes for its area fill, surfaced here as a
+// third number per row: "how much size is available AT OR BETTER than
+// this level," which is what a trader sizing an order against the book
+// actually needs, not just what's resting at one specific price.
+function DepthRows({ levels, side, onLevelClick }) {
   if (!levels.length) {
     return html`<div class="row" style=${{ color: "var(--text-faint)", justifyContent: "center" }}>no resting orders</div>`;
   }
   const maxQty = Math.max(...levels.map((l) => l.qty));
-  const rows = levels.map((l) => html`
-    <div key=${l.px} class=${`depth-row ${side}`}>
+  let running = 0;
+  const withCum = levels.map((l) => {
+    running += l.qty;
+    return { ...l, cum: running };
+  });
+  const rows = withCum.map((l) => html`
+    <div key=${l.px} class=${`depth-row ${side} clickable`}
+         onClick=${() => onLevelClick && onLevelClick(side === "ask" ? "buy" : "sell", l.px)}
+         title=${`${side === "ask" ? "Buy" : "Sell"} at ${fmtMoney(l.px)} (prefills the ticket)`}>
       <div class="depth-bar" style=${{ width: `${Math.max(6, (l.qty / maxQty) * 100)}%` }} />
       <span>${fmtMoney(l.px)}</span>
       <span class="mono">${l.qty}</span>
+      <span class="mono" style=${{ color: "var(--text-faint)" }}>${l.cum}</span>
     </div>
   `);
   return html`<${React.Fragment}>${side === "ask" ? [...rows].reverse() : rows}<//>`;
@@ -76,7 +89,7 @@ function Stat({ label, value, valueClass = "" }) {
   `;
 }
 
-export function OrderBook({ tick }) {
+export function OrderBook({ tick, stale = false, onLevelClick }) {
   const [view, setView] = React.useState("book");
   const bids = tick?.bids || [];
   const asks = tick?.asks || [];
@@ -89,7 +102,7 @@ export function OrderBook({ tick }) {
   const bidPct = totalQty > 0 ? (totalBidQty / totalQty) * 100 : 50;
 
   return html`
-    <div class="panel panel-pad">
+    <div class=${`panel panel-pad ${stale ? "is-stale" : ""}`}>
       <div class="tabs" style=${{ marginBottom: "10px" }}>
         <div class=${`tab ${view === "book" ? "active" : ""}`} onClick=${() => setView("book")}>Book</div>
         <div class=${`tab ${view === "depth" ? "active" : ""}`} onClick=${() => setView("depth")}>Depth</div>
@@ -99,9 +112,12 @@ export function OrderBook({ tick }) {
       ${view === "book"
         ? html`
           <${React.Fragment}>
-            <${DepthRows} levels=${asks} side="ask" />
+            <div class="row" style=${{ color: "var(--text-faint)", fontSize: "10px", padding: "0 8px" }}>
+              <span>Price</span><span class="mono">Qty</span><span class="mono">Cum</span>
+            </div>
+            <${DepthRows} levels=${asks} side="ask" onLevelClick=${onLevelClick} />
             <div class="mid-row">${mid ? fmtMoney(mid) : "—"}</div>
-            <${DepthRows} levels=${bids} side="bid" />
+            <${DepthRows} levels=${bids} side="bid" onLevelClick=${onLevelClick} />
           <//>
         `
         : html`

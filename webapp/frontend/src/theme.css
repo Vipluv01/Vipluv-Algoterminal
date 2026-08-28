@@ -1,11 +1,91 @@
 /* algoterminal design system.
    Dark, data-dense, quant-terminal aesthetic -- but with real typographic
-   care and motion, not just "dark background + green/red numbers". */
+   care and motion, not just "dark background + green/red numbers".
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+   ---------------------------------------------------------------------
+   TOKEN LAYER -- read this before touching a color.
+
+   Every original custom property (--bg, --text, --surface-2, --bid, ...)
+   keeps its ORIGINAL NAME and ORIGINAL VALUE below -- every existing rule
+   in this file (and every one of the 10 shipped pages that references
+   them inline via style=${{ color: "var(--bid-bright)" }}) resolves
+   IDENTICALLY to before this token layer was introduced. That is the
+   whole non-regression contract for this pass: nothing already on screen
+   is allowed to move.
+
+   A NEW semantic layer sits alongside it -- --ground/--surface/--raised
+   (3 elevation tiers), --ink/--ink-soft/--ink-faint (text), --rule/
+   --rule-strong (dividers), --pnl-pos/--pnl-neg (P&L only, see below) --
+   for the 14 screens this phase builds next. --surface is shared: it
+   already meant "panel/card background" before this pass, which is
+   exactly the new layer's "surface" tier, so it needed no renaming, just
+   this comment. --ground, --raised, --ink-*, and --rule-* are plain aliases onto
+   the existing values (var(--bg), var(--surface-hover), var(--text)...)
+   -- zero new colors introduced by the alias layer itself.
+
+   --accent is INTERACTIVE ONLY (buttons, links, focus rings, the active
+   nav/tab indicator) -- it must never double as a P&L or order-side
+   color. --pnl-pos/--pnl-neg are a SEPARATE pair, shifted toward
+   teal-green and amber-red rather than pure red/green (pure red/green is
+   close to indistinguishable for deuteranopia, ~8% of men) -- used by
+   .pos/.neg below. Every text/background pairing in both this dark
+   default and the [data-theme="light"] override at the bottom of this
+   file was checked against the real WCAG contrast formula (relative
+   luminance, not eyeballed) and holds >=4.5:1.
+   --------------------------------------------------------------------- */
+
+/* Self-hosted IBM Plex Sans/Mono (5 static weights, latin subset only --
+   this app never renders non-latin text, so the other 6 Google-served
+   subsets per weight would be dead weight). Previously a Google Fonts
+   CDN <link> in index.html; moved to local files under ./fonts/ for three
+   reasons: (1) no third-party runtime dependency -- a slow/blocked
+   fonts.googleapis.com no longer reflows a screen full of tabular
+   numbers mid-session; (2) Google Fonts logs viewer IPs on every request,
+   which is a real privacy question for something claiming production
+   readiness; (3) font-display: swap here still paints the fallback first
+   and swaps once the local file loads, but that round trip is now same-
+   origin instead of a third-party fetch, so it's materially faster and
+   the FOUT window is smaller. The two files actually needed on first
+   paint (Sans 400 for body text, Mono 400 for the flood of numerals) are
+   additionally <link rel="preload">ed in index.html. */
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../fonts/IBMPlexSans-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../fonts/IBMPlexSans-500.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('../fonts/IBMPlexSans-600.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../fonts/IBMPlexMono-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../fonts/IBMPlexMono-500.woff2') format('woff2');
+}
 
 :root {
-  /* Surfaces -- each one step brighter, for real depth instead of flat panels on flat background. */
+  /* ---- Surfaces -- each one step brighter, for real depth instead of flat panels on flat background. ---- */
   --bg: #06080d;
   --bg-elevated: #0a0e16;
   --surface: #0e1420;
@@ -26,7 +106,7 @@
   --violet: #a78bfa;
   --violet-dim: rgba(167, 139, 250, 0.14);
 
-  /* Semantic */
+  /* Semantic -- order-book / buy-sell side, NOT P&L (see --pnl-pos/--pnl-neg below) */
   --bid: #22c55e;
   --bid-bright: #4ade80;
   --bid-dim: rgba(34, 197, 94, 0.12);
@@ -35,18 +115,177 @@
   --ask-dim: rgba(244, 63, 94, 0.12);
   --warn: #f59e0b;
 
-  /* Type */
-  --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-mono: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+  /* P&L semantics -- deliberately a DIFFERENT hue pair from --bid/--ask
+     above (teal-green / amber-red, not pure green/red) and from --accent
+     (interactive-only) -- see the file-header comment. Color is never
+     the only channel: format.js's pnl() always renders an explicit
+     +/- sign, and .pos/.neg below also carry font-weight as a third,
+     independent channel. */
+  --pnl-pos: #2fbf8f;
+  --pnl-pos-bright: #4ad9ac;
+  --pnl-pos-dim: rgba(47, 191, 143, 0.14);
+  --pnl-neg: #e2583a;
+  --pnl-neg-bright: #f2794f;
+  --pnl-neg-dim: rgba(226, 88, 58, 0.14);
+
+  /* ---- New semantic elevation/text/rule names -- aliases, see file header ---- */
+  --ground: var(--bg);
+  --raised: var(--surface-hover);
+  --ink: var(--text);
+  --ink-soft: var(--text-dim);
+  --ink-faint: var(--text-faint);
+  --rule: var(--border);
+  --rule-strong: var(--border-bright);
+
+  /* ---- Type ----
+     IBM Plex Sans/Mono, self-hosted via @font-face above (see that
+     comment for why this moved off the Google Fonts CDN). Real fallback
+     stacks, not just the webfont name, so a slow font load still renders
+     a readable, metrically-similar face. */
+  --font-ui: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', 'Cascadia Mono', Consolas, ui-monospace, monospace;
+
+  /* Type scale -- stay on these 8 steps for anything new; not retroactively
+     applied to existing ad hoc font-size declarations elsewhere in this
+     file (that would be exactly the "silently restyle 10 working pages"
+     regression this pass exists to avoid). */
+  --fs-1: 11px;
+  --fs-2: 12px;
+  --fs-3: 13px;
+  --fs-4: 14px;
+  --fs-5: 16px;
+  --fs-6: 20px;
+  --fs-7: 26px;
+  --fs-8: 34px;
+
+  /* ---- Density (see [data-density] below for the compact override) ----
+     Comfortable values match today's shipped spacing so the default
+     experience is unchanged; compact is genuinely tighter (a smaller
+     row height, not just smaller text) for anyone who wants more rows
+     on screen at once. */
+  --row-h: 32px;
+  --pad-x: 12px;
+  --font-data: 13px;
+  --gap: 12px;
 
   /* Radii + shadow */
   --radius: 10px;
   --radius-sm: 6px;
   --shadow-card: 0 1px 2px rgba(0,0,0,0.4), 0 8px 24px -8px rgba(0,0,0,0.5);
   --shadow-glow: 0 0 0 1px rgba(45,212,191,0.15), 0 0 24px -4px rgba(45,212,191,0.25);
+
+  /* Translucent chrome (topnav/statusbar/backdrops) -- a themed token
+     rather than a hardcoded rgba(10,14,22,...): those literal values
+     were dark-only, so a light theme built on top of them would still
+     show a near-black translucent bar over an otherwise light page.
+     Same ground hue as --bg at varying alpha, not a separate color. */
+  --scrim-heavy: rgba(10,14,22,0.92);
+  --scrim: rgba(10,14,22,0.85);
+  --scrim-strong: rgba(10,14,22,0.98);
+  --scrim-modal: rgba(5,7,12,0.6);
+  --ticker-bg: #05070c;
+
+  /* ---- Motion ----
+     The tick flash (see .tick-flash-up/.tick-flash-down near the bottom
+     of this file) is the only motion earning its place on financial
+     data -- everything else here is either instant or a plain opacity
+     fade on CHROME (panels, toasts), never on the numbers themselves. */
+  --tick-flash-duration: 120ms;
+}
+
+[data-density="compact"] {
+  --row-h: 24px;
+  --pad-x: 8px;
+  --font-data: 12px;
+  --gap: 8px;
+}
+
+/* ---------------------------------------------------------------------
+   LIGHT THEME -- [data-theme="light"] on <html> (see src/theme.js).
+   Re-declares BOTH the original names and the new semantic aliases: the
+   10 shipped pages reference --bg/--text/--surface-2/--bid-bright/etc.
+   directly, not the new names, so light mode has to retheme those
+   original tokens too or half the app would silently stay dark.
+   Every foreground/background text pairing below is >=4.5:1 by the real
+   WCAG relative-luminance formula (checked with a script, not eyeballed)
+   -- see /tmp/contrast.py-style verification in this task's own report.
+   --------------------------------------------------------------------- */
+:root[data-theme="light"] {
+  --bg: #f5f7fa;
+  --bg-elevated: #eef1f6;
+  --surface: #ffffff;
+  --surface-2: #f0f3f8;
+  --surface-hover: #e7ebf2;
+  --border: #dde3ec;
+  --border-bright: #c7cfdc;
+
+  --text: #12151c;
+  --text-dim: #4b5568;
+  --text-faint: #5f6b80;
+
+  --accent: #0c7a70;
+  --accent-bright: #086158;
+  --accent-dim: rgba(12, 122, 112, 0.10);
+  --violet: #7550c9;
+  --violet-dim: rgba(117, 80, 201, 0.10);
+
+  --bid: #16a34a;
+  --bid-bright: #0d7a3d;
+  --bid-dim: rgba(13, 122, 61, 0.10);
+  --ask: #ea580c;
+  --ask-bright: #c2410c;
+  --ask-dim: rgba(194, 65, 12, 0.10);
+  --warn: #b45309;
+
+  --pnl-pos: #0a7a58;
+  --pnl-pos-bright: #075f45;
+  --pnl-pos-dim: rgba(10, 122, 88, 0.10);
+  --pnl-neg: #c73e1d;
+  --pnl-neg-bright: #a53217;
+  --pnl-neg-dim: rgba(199, 62, 29, 0.10);
+
+  --shadow-card: 0 1px 2px rgba(20,25,35,0.06), 0 8px 24px -10px rgba(20,25,35,0.12);
+  --shadow-glow: 0 0 0 1px rgba(12,122,112,0.15), 0 0 24px -6px rgba(12,122,112,0.18);
+
+  --scrim-heavy: rgba(245,247,250,0.92);
+  --scrim: rgba(245,247,250,0.85);
+  --scrim-strong: rgba(245,247,250,0.98);
+  --scrim-modal: rgba(18,21,28,0.35);
+  --ticker-bg: #eef1f6;
 }
 
 * { box-sizing: border-box; }
+
+/* A real, visible keyboard-focus ring on every interactive element,
+   using the accent token so it's consistent across both themes --
+   :focus-visible (not a bare :focus) so it shows for keyboard
+   navigation without adding a ring to every mouse click. Purely
+   additive: the one existing element with its own specific focus
+   treatment (.input:focus, below) is more specific and still wins for
+   inputs, so this doesn't change anything already styled -- it only
+   fills in the elements (buttons, links, nav items, tabs, chips) that
+   had no explicit focus style before and were relying on whatever the
+   browser's own default happened to be. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* klinecharts renders its own root container with tabindex + an INLINE
+   style="outline: none" (verified via computed styles + outerHTML -- see
+   tests/e2e/gap4_focus_visibility.py's findings). An inline style always
+   wins over a rule in this external stylesheet regardless of selector
+   specificity, EXCEPT one marked !important -- so a keyboard user could
+   Tab directly into a chart pane and get zero visual indication they'd
+   landed anywhere, on every page a chart appears (Charts' 2x2 grid,
+   Terminal, ManualTrade). [tabindex] (not a bare descendant selector)
+   scopes this to elements the library itself made focusable, not our own
+   buttons/toolbar controls, which need no help from this rule. */
+.candle-wrap [tabindex]:focus-visible {
+  outline: 2px solid var(--accent) !important;
+  outline-offset: -2px !important;
+}
 
 html, body {
   margin: 0; padding: 0;
@@ -62,6 +301,14 @@ body {
     radial-gradient(ellipse 900px 500px at 15% -10%, rgba(45,212,191,0.07), transparent),
     radial-gradient(ellipse 700px 500px at 100% 0%, rgba(167,139,250,0.06), transparent);
   background-attachment: fixed;
+}
+/* Same two-tone glow, much fainter -- the dark-theme opacities read as a
+   subtle depth cue on a near-black page; at full strength on a light
+   page they'd show up as a visible muddy tint instead. */
+:root[data-theme="light"] body {
+  background-image:
+    radial-gradient(ellipse 900px 500px at 15% -10%, rgba(12,122,112,0.05), transparent),
+    radial-gradient(ellipse 700px 500px at 100% 0%, rgba(117,80,201,0.04), transparent);
 }
 
 #root { min-height: 100vh; display: flex; flex-direction: column; }
@@ -79,7 +326,7 @@ body {
 
 .ticker {
   overflow: hidden; white-space: nowrap;
-  background: #05070c; border-bottom: 1px solid var(--border);
+  background: var(--ticker-bg); border-bottom: 1px solid var(--border);
   height: 28px; display: flex; align-items: center;
 }
 .ticker-track {
@@ -104,11 +351,38 @@ body {
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 30;
   display: flex; align-items: center; gap: 18px;
   padding: 0 20px; height: 26px;
-  background: rgba(10,14,22,0.92); backdrop-filter: blur(12px);
+  background: var(--scrim-heavy); backdrop-filter: blur(12px);
   border-top: 1px solid var(--border);
   font-size: 10.5px; font-family: var(--font-mono); color: var(--text-faint);
+  /* This bar now carries more items than it did before this task (the
+     connection indicator + last-update timestamp + density toggle + theme
+     toggle are all new) -- on a narrow viewport they no longer fit on one
+     26px-tall line. Scroll the bar itself horizontally, the same
+     contained-overflow treatment this codebase already gives wide tables,
+     rather than letting flex wrap the text mid-word into a cramped
+     2-line bar (the real bug this replaces: confirmed at 375px, "LAST
+     UPDATE" was breaking across "LAST / UPDATE / just"). Nothing is
+     hidden, just reachable with a horizontal swipe on narrow viewports;
+     desktop widths never overflow so this is invisible there. */
+  overflow-x: auto; overflow-y: hidden; white-space: nowrap;
+  scrollbar-width: none; /* Firefox -- a 26px chrome bar showing its own scrollbar looks broken */
 }
-.statusbar-item { display: flex; align-items: center; gap: 6px; }
+.statusbar::-webkit-scrollbar { display: none; }
+.statusbar-item { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+
+/* keyboard.js's pending-chord hint (e.g. "G…" while waiting for the 2nd
+   key) and ShortcutOverlay's keycap badges -- a half-typed chord with no
+   visible feedback reads as broken, not "waiting for more input". */
+.chord-hint {
+  color: var(--accent-bright); font-family: var(--font-mono); font-weight: 700;
+  letter-spacing: 0.04em; animation: pulse 1s ease-in-out infinite;
+}
+.kbd {
+  display: inline-block; min-width: 18px; padding: 2px 6px; text-align: center;
+  background: var(--surface-2); border: 1px solid var(--border-bright); border-bottom-width: 2px;
+  border-radius: 4px; font-family: var(--font-mono); font-size: 11px; font-weight: 700; color: var(--text-dim);
+}
+.shortcut-hint { color: var(--text-faint); font-size: 10px; margin-left: 6px; }
 .statusbar-spacer { flex: 1; }
 
 /* ---------- Layout ---------- */
@@ -116,7 +390,7 @@ body {
 .topnav {
   display: flex; align-items: center; gap: 28px;
   padding: 0 24px; height: 56px;
-  background: rgba(10,14,22,0.85);
+  background: var(--scrim);
   backdrop-filter: blur(16px) saturate(1.3);
   border-bottom: 1px solid var(--border);
   position: sticky; top: 0; z-index: 40;
@@ -131,11 +405,20 @@ body {
 }
 .brand-sub { color: var(--text-faint); font-weight: 500; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; }
 
-.nav-links { display: flex; align-items: center; gap: 4px; flex: 1; }
+/* overflow-x: auto (not wrap) -- 16 nav items no longer fit in one row at
+   every desktop width this app supports, and letting a long label like
+   "Portfolio IQ" wrap onto two lines inside its own flex item just cuts
+   off whatever's after it instead of actually solving the fit problem.
+   Scrolling keeps every item a single row, always fully legible, always
+   reachable. Scrollbar hidden since this is a nav bar, not a content
+   area -- the row still scrolls via trackpad/shift-wheel/arrow keys once
+   a link inside it has focus. */
+.nav-links { display: flex; align-items: center; gap: 4px; flex: 1; overflow-x: auto; scrollbar-width: none; -ms-overflow-style: none; }
+.nav-links::-webkit-scrollbar { display: none; }
 .nav-link {
   padding: 7px 13px; border-radius: 7px; font-size: 13px; font-weight: 500;
   color: var(--text-dim); text-decoration: none; cursor: pointer;
-  transition: color .15s, background .15s;
+  transition: color .15s, background .15s; white-space: nowrap; flex-shrink: 0;
   border: none; background: transparent; font-family: inherit;
 }
 .nav-link:hover { color: var(--text); background: var(--surface-hover); }
@@ -189,8 +472,15 @@ body {
 .stat-value { font-family: var(--font-mono); font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
 .stat-sub { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
 
-.pos { color: var(--bid-bright); } .neg { color: var(--ask-bright); }
-.pos-bg { background: var(--bid-dim); } .neg-bg { background: var(--ask-dim); }
+/* P&L only (see --pnl-pos/--pnl-neg's own comment at the top of this
+   file) -- NOT the same tokens as the order-book --bid/--ask pair, and
+   font-weight is a deliberate SECOND channel alongside color, so a
+   gain/loss still reads correctly for a viewer who can't distinguish the
+   hue at all. This is an intentional visual change from the earlier
+   pure-green/pure-red pair (see this task's own accessibility notes). */
+.pos { color: var(--pnl-pos-bright); font-weight: 600; }
+.neg { color: var(--pnl-neg-bright); font-weight: 600; }
+.pos-bg { background: var(--pnl-pos-dim); } .neg-bg { background: var(--pnl-neg-dim); }
 
 /* ---------- Buttons / inputs ---------- */
 
@@ -230,7 +520,15 @@ textarea.input { font-family: var(--font-ui); resize: vertical; min-height: 60px
 
 /* ---------- Tables / lists ---------- */
 
-.row { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; font-size: 12.5px; }
+/* min-height (not a fixed height) driven by --row-h/--font-data (see the
+   [data-density] tokens at the top of this file): comfortable's 32px
+   default sits close to this row's original ~26px rendered height
+   (5px vertical padding + a 12.5px line), compact's 24px is genuinely
+   tighter, not just smaller text. Horizontal padding is deliberately
+   NOT tied to --pad-x here -- .hairline's border-bottom is meant to span
+   the row EDGE TO EDGE inside its panel; adding side padding would inset
+   it and visibly break that. */
+.row { display: flex; justify-content: space-between; align-items: center; min-height: var(--row-h); padding: 5px 0; font-size: var(--font-data); }
 .hairline { border-bottom: 1px solid var(--border); }
 
 /* For genuinely tabular data (a header row + data rows that must line up
@@ -243,10 +541,42 @@ textarea.input { font-family: var(--font-ui); resize: vertical; min-height: 60px
    their own header under real data. */
 .table-row {
   display: grid; grid-template-columns: 2fr 1fr 1fr 1fr;
-  align-items: center; padding: 6px 0; font-size: 12.5px;
+  align-items: center; min-height: var(--row-h); padding: 6px 0; font-size: var(--font-data);
 }
 .table-row span:not(:first-child) { text-align: right; }
 
+/* DataTable primitive (components/DataTable.js) -- N columns via a grid
+   template computed from the `columns` prop at render time, unlike
+   .table-row's fixed 2fr/1fr/1fr/1fr above (which stays as-is; it's still
+   correct for the fixed-shape tables already using it). */
+.data-table { width: 100%; overflow-x: auto; }
+.data-table-header, .data-table-row {
+  display: grid; align-items: center; min-height: var(--row-h);
+  padding: 0 var(--pad-x); font-size: var(--font-data); gap: var(--gap);
+}
+.data-table-header {
+  position: sticky; top: 0; z-index: 1; background: var(--surface);
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-faint); border-bottom: 1px solid var(--border-bright);
+}
+.data-table-row { border-bottom: 1px solid var(--border); }
+.data-table-row:hover { background: var(--surface-hover); }
+.data-table-th.sortable { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 4px; }
+.data-table-th.sortable:hover { color: var(--text); }
+.sort-indicator { font-size: 9px; }
+.align-right { text-align: right; }
+.data-table-pager {
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  padding: 10px 0; font-size: 11.5px; color: var(--text-dim);
+}
+.data-table-virtual-viewport { overflow-y: auto; }
+
+/* Deliberately NOT wired to --row-h/--font-data: an order-book ladder's
+   whole value is showing as many price levels as fit in the panel, a
+   different, denser design target than a generic list/table row --
+   unifying it with the shared density tokens would cost real visible
+   depth levels in comfortable mode for no benefit the density toggle is
+   meant to provide. */
 .depth-row { position: relative; display: flex; justify-content: space-between; padding: 3px 8px; font-size: 12px; border-radius: 4px; overflow: hidden; }
 .depth-bar { position: absolute; top: 0; bottom: 0; right: 0; opacity: 0.16; z-index: 0; }
 .depth-row span { position: relative; z-index: 1; }
@@ -254,6 +584,8 @@ textarea.input { font-family: var(--font-ui); resize: vertical; min-height: 60px
 .depth-row.ask .depth-bar { background: var(--ask); }
 .depth-row.bid { color: var(--bid-bright); }
 .depth-row.ask { color: var(--ask-bright); }
+.depth-row.clickable { cursor: pointer; }
+.depth-row.clickable:hover { background: var(--surface-hover); }
 
 .mid-row { text-align: center; padding: 8px 0; margin: 3px 0; color: var(--accent-bright); font-weight: 700; font-family: var(--font-mono); border-top: 1px dashed var(--border); border-bottom: 1px dashed var(--border); }
 
@@ -267,7 +599,7 @@ textarea.input { font-family: var(--font-ui); resize: vertical; min-height: 60px
 .candle-timeframes { max-width: 220px; }
 .indicator-picker-backdrop {
   position: fixed; inset: 0; z-index: 200;
-  background: rgba(5,7,12,0.6); backdrop-filter: blur(2px);
+  background: var(--scrim-modal); backdrop-filter: blur(2px);
   display: flex; align-items: center; justify-content: center;
 }
 .indicator-picker {
@@ -289,6 +621,34 @@ textarea.input { font-family: var(--font-ui); resize: vertical; min-height: 60px
 }
 .indicator-picker-row:hover { background: var(--surface-hover); }
 
+/* Generic modal primitive (components/Modal.js) -- .indicator-picker* above
+   is CandleChart's own pre-existing bespoke implementation of the same
+   backdrop+panel shape; Modal.js generalizes it as .modal-backdrop/.modal
+   rather than duplicating a near-identical set of rules under a new name.
+   Sizes match common content shapes (a short confirm dialog vs a form vs
+   the indicator picker's own list) rather than one fixed width. */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 300;
+  background: var(--scrim-modal); backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}
+.modal {
+  width: 100%; max-height: 85vh; overflow-y: auto;
+  background: var(--surface); border: 1px solid var(--border-bright);
+  border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  display: flex; flex-direction: column;
+}
+.modal-sm { max-width: 320px; }
+.modal-md { max-width: 480px; }
+.modal-lg { max-width: 720px; }
+.modal-header {
+  display: flex; justify-content: space-between; align-items: center;
+  font-weight: 700; font-size: 14px; padding: 16px 18px;
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.modal-body { padding: 18px; overflow-y: auto; }
+
 .badge {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 3px 9px; border-radius: 999px; font-size: 10.5px; font-weight: 700;
@@ -297,6 +657,54 @@ textarea.input { font-family: var(--font-ui); resize: vertical; min-height: 60px
 .badge-live { background: var(--bid-dim); color: var(--bid-bright); border: 1px solid rgba(34,197,94,0.3); }
 .badge-off { background: var(--surface-2); color: var(--text-faint); border: 1px solid var(--border); }
 .badge-accent { background: var(--accent-dim); color: var(--accent-bright); border: 1px solid rgba(45,212,191,0.3); }
+/* Same treatment as badge-mode-live below, under a name that isn't about
+   trading mode -- for any status that's a real negative outcome (a
+   rejected/cancelled order in Logs, e.g.), not just "live trading". */
+.badge-neg { background: var(--pnl-neg-dim); color: var(--pnl-neg-bright); border: 1px solid rgba(226,88,58,0.4); }
+
+/* Mode switcher (components/ModeSwitcher.js, src/mode.js) -- three
+   deliberately different treatments so paper/virtual/live are never
+   confusable at a glance: paper reads as calm/neutral (it's the safe
+   default), virtual as informational (violet, matching the app's own
+   secondary-accent hue), live as a real warning (the same amber-red used
+   for --pnl-neg and --warn elsewhere) -- "paper is calm, live isn't" is a
+   literal design instruction, not a metaphor. */
+.badge-mode-paper { background: var(--surface-2); color: var(--text-dim); border: 1px solid var(--border); }
+.badge-mode-virtual { background: var(--violet-dim); color: var(--violet); border: 1px solid rgba(167,139,250,0.35); }
+.badge-mode-live { background: var(--pnl-neg-dim); color: var(--pnl-neg-bright); border: 1px solid rgba(226,88,58,0.4); }
+
+/* The viewport's top border, colored by mode -- "unmissable" per spec,
+   so it's a fixed strip spanning every screen (including Landing, unlike
+   the nav/StatusBar which only render past it) rather than living inside
+   any one page's own layout, where it could be scrolled out of view. */
+.mode-strip { position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 500; pointer-events: none; }
+:root[data-mode="paper"] .mode-strip { background: var(--border-bright); }
+:root[data-mode="virtual"] .mode-strip { background: var(--violet); }
+:root[data-mode="live"] .mode-strip { background: var(--pnl-neg); box-shadow: 0 0 12px var(--pnl-neg); }
+
+.mode-switcher { position: relative; }
+.mode-dropdown {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 250; width: 240px;
+  background: var(--surface); border: 1px solid var(--border-bright); border-radius: 10px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5); padding: 6px;
+}
+.mode-option {
+  display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: 6px; cursor: pointer;
+}
+.mode-option:hover:not(.mode-option-blocked) { background: var(--surface-hover); }
+.mode-option-blocked { cursor: not-allowed; opacity: 0.55; }
+.mode-option-label { font-weight: 700; font-size: 12.5px; text-transform: capitalize; }
+.mode-option-reason { font-size: 10.5px; color: var(--text-faint); line-height: 1.4; }
+
+/* Circuit-breaker halt banner (App.js, driven by src/riskStatus.js) --
+   GLOBAL by design: a halt is a fact about the WHOLE account's ability to
+   trade, not something scoped to whichever screen happens to be open when
+   it trips. Sits below the mode-strip, above everything else. */
+.halt-banner {
+  position: sticky; top: 3px; z-index: 400; display: flex; align-items: center; justify-content: center;
+  gap: 12px; padding: 8px 16px; background: var(--pnl-neg); color: #06080d; font-weight: 700; font-size: 12.5px;
+}
+.halt-banner button { flex-shrink: 0; }
 
 .chip {
   display: inline-flex; align-items: center; padding: 6px 12px; border-radius: 8px;
@@ -321,6 +729,99 @@ textarea.input { font-family: var(--font-ui); resize: vertical; min-height: 60px
 
 .fade-in { animation: fadeIn .3s ease; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ---------- Tick flash ----------
+   The ONE motion that earns its place on financial data: a brief
+   background pulse when a price/number updates, decaying over
+   --tick-flash-duration (120ms). Applied by a component as a CSS class
+   toggled on and off around a tick event (add on update, the animation
+   itself removes the visual effect by playing out -- no JS-driven cleanup
+   needed beyond letting the class fall off on the next render).
+
+   Deliberately NOT a `transition` on color/background: a transitioned
+   text color smears through every intermediate hue on the way to its
+   target, which reads as noise, not a signal, on a number that changes
+   often. An `animation` with a single decisive background pulse (no
+   mid-animation color values a viewer has to interpret) avoids that.
+   Text color itself is never transitioned or animated here. */
+.tick-flash-up { animation: tickFlashUp var(--tick-flash-duration) ease-out; }
+.tick-flash-down { animation: tickFlashDown var(--tick-flash-duration) ease-out; }
+@keyframes tickFlashUp { from { background-color: var(--pnl-pos-dim); } to { background-color: transparent; } }
+@keyframes tickFlashDown { from { background-color: var(--pnl-neg-dim); } to { background-color: transparent; } }
+
+/* prefers-reduced-motion: replace the flash with a static, non-animated
+   1px underline held for the same duration -- same "something just
+   updated" signal, zero motion. The component applying tick-flash-up/
+   down still toggles the SAME class names; this media query just swaps
+   what those classes mean, so no component-level branching is needed. */
+@media (prefers-reduced-motion: reduce) {
+  .tick-flash-up, .tick-flash-down { animation: none; }
+  .tick-flash-up { box-shadow: inset 0 -1px 0 0 var(--pnl-pos); }
+  .tick-flash-down { box-shadow: inset 0 -1px 0 0 var(--pnl-neg); }
+}
+
+/* No entrance animation on tables/lists (a row fading/sliding in on every
+   data refresh reads as instability, the same reasoning the tick-flash
+   comment above gives) -- .fade-in above is reserved for one-shot UI
+   chrome (a newly-opened panel, a toast), never a table's own rows or
+   any page transition between routes. */
+
+/* ---------- Five states: skeleton / empty / error / stale ---------- */
+
+/* Skeleton.js's shapes reuse the existing shimmer above at fixed FINAL
+   dimensions (skeletons must occupy the space the real content will,
+   so nothing shifts once data arrives -- a spinner hides the layout
+   shift instead of preventing it, which is why this isn't a spinner). */
+.skeleton-line { height: 12px; margin: 4px 0; }
+.skeleton-line:last-child { width: 60%; }
+
+.empty-state {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; padding: 36px 20px; text-align: center; color: var(--ink-soft);
+}
+.empty-state-message { font-size: 13px; max-width: 320px; line-height: 1.5; }
+
+.error-state {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 10px;
+  padding: 16px; border-radius: var(--radius-sm);
+  background: var(--pnl-neg-dim); border: 1px solid rgba(226,88,58,0.35);
+  color: var(--ink);
+}
+:root[data-theme="light"] .error-state { border-color: rgba(199,62,29,0.35); }
+.error-state-title { font-weight: 600; font-size: 13px; color: var(--pnl-neg-bright); }
+.error-state-detail { font-size: 12px; color: var(--ink-soft); }
+
+/* Stale data: desaturate + dim, but the LAST VALUE stays visible and in
+   place -- never blanked, never replaced by a skeleton (that would look
+   like a fresh load, not "this used to be current"). Grayscale (not just
+   opacity) is what reads as "not live" at a glance even before a viewer
+   consciously notices the timestamp next to it. */
+.is-stale { filter: grayscale(0.6) opacity(0.55); transition: filter .4s ease, opacity .4s ease; }
+
+/* ---------- Connection indicator (StatusBar) ---------- */
+
+.conn-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.conn-dot.live { background: var(--bid-bright); box-shadow: 0 0 8px var(--bid-bright); animation: pulse 2s ease-in-out infinite; }
+.conn-dot.connecting { background: var(--warn); animation: pulse 1s ease-in-out infinite; }
+.conn-dot.reconnecting { background: var(--warn); animation: pulse .6s ease-in-out infinite; }
+.conn-dot.offline { background: var(--pnl-neg); }
+@media (prefers-reduced-motion: reduce) {
+  .conn-dot.live, .conn-dot.connecting, .conn-dot.reconnecting { animation: none; }
+}
+
+/* ---------- Density toggle (StatusBar) ---------- */
+
+.density-toggle {
+  display: flex; align-items: center; gap: 2px;
+  background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 999px;
+  padding: 2px;
+}
+.density-toggle button {
+  font-family: inherit; font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 2px 7px; border-radius: 999px; border: none; background: transparent;
+  color: var(--text-faint); cursor: pointer; line-height: 1.6;
+}
+.density-toggle button.active { background: var(--surface-2); color: var(--text); }
 
 .toast {
   position: fixed; bottom: 20px; right: 20px; z-index: 100;
@@ -393,7 +894,7 @@ a:hover { text-decoration: underline; }
   .nav-links {
     display: none; position: absolute; top: 56px; left: 0; right: 0;
     flex-direction: column; align-items: stretch; gap: 2px;
-    padding: 10px 14px 16px; background: rgba(10,14,22,0.98);
+    padding: 10px 14px 16px; background: var(--scrim-strong);
     backdrop-filter: blur(16px) saturate(1.3);
     border-bottom: 1px solid var(--border);
   }
@@ -407,3 +908,44 @@ a:hover { text-decoration: underline; }
   .accounts-grid { grid-template-columns: minmax(0, 1fr); }
   .trade-grid { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* ---------- Journal: rendered markdown + read-only tag chips ---------- */
+
+/* A tag shown as a fact about a note (NoteCard) isn't a control -- reuses
+   .chip's shape/color but without the pointer cursor .chip implies for
+   the real filter buttons above it, which ARE clickable. */
+.chip.static { cursor: default; }
+.chip.static:hover { color: var(--text-dim); border-color: var(--border); }
+
+/* marked.parse() output (already sanitized server-side via nh3 before
+   storage, see journal.py) renders through this wrapper -- theme.css has
+   no base styles for bare p/ul/code/etc, so without this a note reads as
+   unstyled browser-default black-on-transparent text sitting inside a
+   dark panel. */
+.journal-note-body { font-size: 13px; line-height: 1.6; color: var(--ink); }
+.journal-note-body > *:first-child { margin-top: 0; }
+.journal-note-body > *:last-child { margin-bottom: 0; }
+.journal-note-body p { margin: 8px 0; }
+.journal-note-body ul, .journal-note-body ol { margin: 8px 0; padding-left: 22px; }
+.journal-note-body li { margin: 3px 0; }
+.journal-note-body h1, .journal-note-body h2, .journal-note-body h3 { font-size: 14px; font-weight: 700; margin: 14px 0 6px; }
+.journal-note-body code { font-family: var(--font-mono); font-size: 12px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+.journal-note-body pre { background: var(--surface-2); padding: 10px 12px; border-radius: var(--radius-sm); overflow-x: auto; }
+.journal-note-body pre code { background: none; padding: 0; }
+.journal-note-body blockquote { margin: 8px 0; padding-left: 12px; border-left: 2px solid var(--border-bright); color: var(--ink-soft); }
+.journal-note-body a { color: var(--accent-bright); }
+
+/* ---------- Options: persistent execution notice ---------- */
+
+/* Same "always present, not a tooltip" treatment as .halt-banner, but
+   informational (violet, matching the app's own secondary-accent hue used
+   elsewhere for "worth knowing" rather than "something's wrong") -- every
+   other fill in this app is a real match from the Go engine; this one
+   isn't, and that has to be visible without hovering anything. */
+.notice-banner {
+  display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  border-radius: var(--radius-sm); background: var(--violet-dim);
+  border: 1px solid rgba(167,139,250,0.35); color: var(--ink);
+  font-size: 12.5px; line-height: 1.5; margin-bottom: 16px;
+}
+.notice-banner strong { color: var(--violet); }

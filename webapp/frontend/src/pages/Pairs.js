@@ -3,6 +3,7 @@ import { html } from "../html.js";
 import { api } from "../api.js";
 import { fmtMoney, fmtNum, pnlClass } from "../format.js";
 import { LineChart } from "../components/LineChart.js";
+import { BellCurve } from "../components/BellCurve.js";
 import { useToast } from "../toast.js";
 
 const TABS = ["Overview", "Analytics"];
@@ -79,6 +80,14 @@ function OverviewTab({ data }) {
         <${StatCard} label="Correlation" value=${data.correlation?.toFixed(3) ?? "—"} />
       </div>
 
+      <div class="panel panel-pad" style=${{ marginBottom: "14px" }}>
+        <div class="panel-title">Spread Position (z-gauge)</div>
+        <${BellCurve} zScore=${data.zscore ?? null}
+                      entryZ=${data.zscore !== null && data.zscore < 0 ? -data.config.entry_z : data.config.entry_z}
+                      stopZ=${data.zscore !== null && data.zscore < 0 ? -data.config.stop_z : data.config.stop_z}
+                      height=${160} />
+      </div>
+
       <div class="dash-grid">
         <div class="panel panel-pad">
           <div class="panel-title">Strategy Parameters</div>
@@ -145,6 +154,10 @@ function AnalyticsTab({ data, onForceClose, closing }) {
         <div class="panel panel-pad">
           <div class="panel-title">Kalman Hedge Ratio (β)</div>
           <${LineChart} series=${data.hedge_ratio_series} color="var(--violet)" />
+        </div>
+        <div class="panel panel-pad">
+          <div class="panel-title">Raw Spread</div>
+          <${LineChart} series=${data.spread_series} color="var(--accent-bright)" />
         </div>
       </div>
 

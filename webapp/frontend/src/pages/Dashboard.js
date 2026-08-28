@@ -5,7 +5,6 @@ import { fmtMoney, fmtPct, pnlClass } from "../format.js";
 import { Calendar } from "../components/Calendar.js";
 import { Sparkline } from "../components/Sparkline.js";
 import { Gauge } from "../components/Gauge.js";
-import { useToast } from "../toast.js";
 
 function StatCard({ label, value, valueClass = "", sub, right }) {
   return html`
@@ -37,51 +36,35 @@ function DayWinBars({ calendar }) {
   `;
 }
 
+// Read-only preview -- writing/deleting notes now happens exclusively on
+// the Journal screen (#/journal, see app/routers/journal.py's module
+// docstring: /dashboard/notes was removed, not duplicated, so there is
+// exactly one place notes are read OR written). This panel just surfaces
+// the 3 most recent so the Dashboard still shows journal activity at a
+// glance, without re-implementing add/remove against the same table twice.
 function NotesPanel() {
-  const [notes, setNotes] = React.useState([]);
-  const [text, setText] = React.useState("");
-  const [loading, setLoading] = React.useState(true);
-  const toast = useToast();
+  const [notes, setNotes] = React.useState(null); // null = loading
 
-  const load = React.useCallback(() => {
-    api.dashboard.notes.list().then(setNotes).finally(() => setLoading(false));
+  React.useEffect(() => {
+    api.journal.list().then(setNotes).catch(() => setNotes([]));
   }, []);
-  React.useEffect(load, [load]);
 
-  async function add() {
-    if (!text.trim()) return;
-    try {
-      await api.dashboard.notes.create(text.trim());
-      setText("");
-      load();
-    } catch (e) {
-      toast(e.message || "Could not save note", "err");
-    }
-  }
-
-  async function remove(id) {
-    await api.dashboard.notes.delete(id);
-    load();
-  }
+  const recent = notes ? notes.slice(0, 3) : [];
 
   return html`
     <div class="panel panel-pad">
-      <div class="panel-title">Journal Notes</div>
-      <div style=${{ display: "flex", gap: "8px", marginBottom: "14px" }}>
-        <input class="input" placeholder="What happened today?" value=${text}
-               onInput=${(e) => setText(e.target.value)}
-               onKeyDown=${(e) => e.key === "Enter" && add()} />
-        <button class="btn btn-primary" onClick=${add}>Add</button>
+      <div style=${{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" }}>
+        <div class="panel-title" style=${{ marginBottom: 0 }}>Journal</div>
+        <a href="#/journal" class="btn btn-sm btn-ghost">Open Journal →</a>
       </div>
-      ${loading && html`<div class="skeleton" style=${{ height: "60px" }} />`}
-      ${!loading && !notes.length && html`<div style=${{ color: "var(--text-faint)" }}>No notes yet — jot down why you made a trade, or how the session went.</div>`}
-      ${!loading && notes.map((n) => html`
+      ${notes === null && html`<div class="skeleton" style=${{ height: "60px" }} />`}
+      ${notes !== null && !notes.length && html`<div style=${{ color: "var(--text-faint)" }}>No entries yet — jot down why you made a trade, or how the session went, in the Journal.</div>`}
+      ${notes !== null && recent.map((n) => html`
         <div key=${n.id} class="row hairline" style=${{ alignItems: "flex-start" }}>
           <div>
             <div style=${{ color: "var(--text-faint)", fontSize: "10.5px", marginBottom: "3px" }}>${new Date(n.created_at).toLocaleString()}</div>
             <div>${n.text}</div>
           </div>
-          <button class="btn btn-sm btn-ghost" onClick=${() => remove(n.id)}>✕</button>
         </div>
       `)}
     </div>
