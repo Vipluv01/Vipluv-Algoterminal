@@ -13,6 +13,25 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# MUST run before any `from app...` import below -- app/db.py reads
+# DATABASE_URL from the environment at MODULE IMPORT time (not lazily),
+# so a .env file loaded any later than this would already be too late for
+# it. `python-dotenv` has been a listed dependency since early on but was
+# never actually wired up to load anything -- real gap, not a redundant
+# addition: a plain `export BROKER_CREDENTIAL_KEY=...` in the shell that
+# happened to start this process is exactly the kind of state that
+# silently vanishes across a restart from a DIFFERENT shell (confirmed
+# directly: a routine dev-server restart during this same phase did just
+# that, and POST /vault/credential started 500ing with no clue why until
+# traced back to crypto.py's MissingCredentialKeyError). A `.env` file
+# next to this one (webapp/.env, already `.gitignore`d) survives that.
+# python-dotenv's own default (override=False) never clobbers a real
+# env var that IS already set, so this changes nothing for a deployment
+# that sets these directly.
+load_dotenv()
+
 from fastapi import FastAPI, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
@@ -29,8 +48,8 @@ from app.pairs_service import refresh_pair_telemetry_once, reset_pair_telemetry
 from app.telemetry import reset_order_submit_latencies
 from app.risk.circuit_breaker import run_circuit_breakers_once
 from app.routers import (
-    account, dashboard, journal, leaderboard, market, market_ws, optimizer, options, orders, pairs, portfolio,
-    risk, strategies, telemetry, vault,
+    account, dashboard, journal, leaderboard, live_market, market, market_ws, optimizer, options, orders, pairs,
+    portfolio, risk, strategies, telemetry, vault, virtual,
 )
 from app.strategy_runner import run_strategies_once
 
@@ -151,6 +170,8 @@ app.include_router(portfolio.router)
 app.include_router(vault.router)
 app.include_router(leaderboard.router)
 app.include_router(telemetry.router)
+app.include_router(virtual.router)
+app.include_router(live_market.router)
 
 
 @app.get("/healthz")

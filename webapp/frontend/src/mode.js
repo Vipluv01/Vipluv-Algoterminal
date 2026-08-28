@@ -5,21 +5,81 @@
 // here. Same external-store shape as theme.js's theme/density (one
 // source of truth, persisted, subscribable), for the same reason.
 import React from "react";
+import { api } from "./api.js";
 
 const MODE_KEY = "algoterminal:mode";
 const VALID_MODES = ["paper", "virtual", "live"];
 const DEFAULT_MODE = "paper";
 
-// Neither virtual nor live has anything real behind it yet (no broker
-// credentials flow, no virtual-capital ledger) -- exposed here, not
-// hardcoded per-component, so every place that needs to know "can this
-// mode actually be selected right now" (the switcher, Accounts' chips)
-// asks the same question and gets the same answer instead of drifting.
+// paper and virtual are both unconditionally available now: virtual has
+// no per-user setup step (routers/virtual.py computes its account view
+// from Order.mode==virtual the same way paper's does -- an account with
+// zero orders is just a fresh Rs 1cr balance, not an error). Live is
+// deliberately NOT in this static object -- whether it's usable depends
+// on real per-user state (a stored, COMPLETE broker credential) that can
+// change at any time, so it needs an actual API check, not a flag. See
+// useLiveReadiness below -- every place that needs to know "can live
+// actually be selected right now" (ModeSwitcher, Accounts' chips) calls
+// the same hook and gets the same answer instead of drifting.
 export const MODE_BLOCKED_REASON = {
   paper: null,
-  virtual: "Virtual capital tracking isn't implemented yet — Phase 7.",
-  live: "Requires connected broker credentials — Phase 7.",
+  virtual: null,
 };
+
+// Mirrors app/broker/adapter_cache.py's get_adapter_for_user EXACTLY --
+// same two conditions (a credential row exists; it has both client_code
+// and totp_secret) -- so this can never claim "ready" in a case the
+// backend would actually reject the first time a live order is
+// confirmed. It cannot verify the credential is genuinely valid against
+// Angel One itself (no way to know that without a real login attempt),
+// only that it's COMPLETE enough for the backend to attempt one.
+async function checkLiveReadinessNow() {
+  try {
+    const cred = await api.vault.get();
+    if (!cred) return { status: "blocked", reason: "No broker credential stored — add one in Vault first." };
+    if (!cred.client_code_last4 || !cred.has_totp_secret) {
+      return { status: "blocked", reason: "Broker credential is missing client code and/or TOTP secret — both are required for Angel One login." };
+    }
+    return { status: "ready", reason: null };
+  } catch {
+    return { status: "blocked", reason: "Could not check broker credential status." };
+  }
+}
+
+export function useLiveReadiness(active) {
+  const [state, setState] = React.useState({ status: "checking", reason: null });
+
+  React.useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    setState({ status: "checking", reason: null });
+    checkLiveReadinessNow().then((result) => { if (!cancelled) setState(result); });
+    return () => { cancelled = true; };
+    // Re-runs on every false->true transition of `active` (e.g. the mode
+    // picker being opened again) -- deliberately not cached across opens,
+    // since a credential added or rotated in Vault since the last check
+    // must be reflected immediately, not on some stale cadence. This is
+    // still only fresh as of when the picker opened, not as of the exact
+    // moment a caller later flips the mode -- see setLiveMode below for
+    // the version that re-checks immediately before acting.
+  }, [active]);
+
+  return state;
+}
+
+// The version LiveConfirmModal's own confirm button should call, NOT
+// setMode(next, { liveReadiness }) directly with a hook value that may
+// have been sitting around since the picker was opened -- a credential
+// rotated or removed in the seconds between opening the confirm dialog
+// and clicking confirm (rare, but the typed-word friction makes the gap
+// real, not hypothetical) must not ride through on a stale "ready".
+// Re-checks right here, then calls the real enforcement point with a
+// same-instant result.
+export async function setLiveMode() {
+  const fresh = await checkLiveReadinessNow();
+  const ok = setMode("live", { liveReadiness: fresh });
+  return { ok, reason: fresh.reason };
+}
 
 function readStored() {
   try {
@@ -64,13 +124,23 @@ export function getMode() {
   return mode;
 }
 
-// Never faked: a mode with a MODE_BLOCKED_REASON refuses to set. There is
-// no "looks selected but silently behaves as paper" state reachable
-// through this function -- the caller (ModeSwitcher) is expected to check
-// MODE_BLOCKED_REASON itself and never call this for a blocked mode, but
-// this is the actual enforcement point, not just the UI's good behavior.
-export function setMode(next) {
-  if (!VALID_MODES.includes(next) || MODE_BLOCKED_REASON[next]) return false;
+// Never faked: paper/virtual refuse via the static MODE_BLOCKED_REASON
+// check, same as before. Live is different NOW that its gate is async
+// (useLiveReadiness) rather than a static flag -- this function can't run
+// that check itself (it's synchronous, and a network round trip can't be
+// forced into that shape), so it demands the CALLER's already-fetched
+// readiness result as proof, and refuses "live" without one that says
+// "ready". This is what stops a future caller from skipping the check by
+// accident: setMode("live") alone (no second argument) fails closed,
+// rather than silently succeeding the way it would if this function just
+// trusted the caller to have checked. liveReadiness is verified fresh, not
+// cached here, whether it was actually checked recently is still the
+// caller's job (see useLiveReadiness's own comment on always re-checking
+// on open) -- this only closes the "forgot to check at all" gap.
+export function setMode(next, { liveReadiness } = {}) {
+  if (!VALID_MODES.includes(next)) return false;
+  if (MODE_BLOCKED_REASON[next]) return false;
+  if (next === "live" && liveReadiness?.status !== "ready") return false;
   mode = next;
   writeStored(mode);
   notify();

@@ -1,6 +1,6 @@
 import React from "react";
 import { html } from "../html.js";
-import { api, subscribeMarket } from "../api.js";
+import { api, subscribeMarketForMode } from "../api.js";
 import { fmtMoney } from "../format.js";
 import { CandleChart } from "../components/CandleChart.js";
 import { OrderBook } from "../components/OrderBook.js";
@@ -8,6 +8,7 @@ import { OrderEntry } from "../components/OrderEntry.js";
 import { AccountPanel } from "../components/AccountPanel.js";
 import { TimeAndSales } from "../components/TimeAndSales.js";
 import { DEFAULT_STALE_THRESHOLD_MS, useStaleness } from "../clock.js";
+import { useMode } from "../mode.js";
 
 const STATUS_LABEL = { connecting: "Connecting…", live: "Live", reconnecting: "Reconnecting…", offline: "Offline" };
 
@@ -38,6 +39,7 @@ export function Terminal() {
   // comment for why `nonce` matters (re-clicking a level with the same
   // side needs to re-apply, not be a no-op React skips as "unchanged").
   const [orderPrefill, setOrderPrefill] = React.useState(null);
+  const tradingMode = useMode();
 
   React.useEffect(() => {
     api.symbols().then((rows) => {
@@ -50,7 +52,8 @@ export function Terminal() {
     if (!active) return;
     setWsStatus("connecting");
     setLastTickAt(null);
-    const unsub = subscribeMarket(
+    const unsub = subscribeMarketForMode(
+      tradingMode,
       active,
       (tick) => {
         setLastTickAt(Date.now());
@@ -59,7 +62,7 @@ export function Terminal() {
       setWsStatus,
     );
     return unsub;
-  }, [active]);
+  }, [active, tradingMode]);
 
   // Same derivation StatusBar.js uses: raw WS status alone can't tell a
   // connection that dropped a moment ago from one that's been down for a

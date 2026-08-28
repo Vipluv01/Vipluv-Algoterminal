@@ -4,9 +4,6 @@ history rather than stored and mutated directly."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Callable
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -14,53 +11,14 @@ from sqlalchemy.orm import Session
 from app.accounting import compute_account, compute_equity_curve
 from app.auth import get_current_user
 from app.db import get_db
-from app.markets import DERIVED_INDICES, MarketRegistry
+from app.market_price_lookup import historical_price_lookup
+from app.markets import MarketRegistry
 from app.models.trading import Mode, Order, SubAccount
 from app.models.user import User
 from app.options.execution import mark_option_positions
 from app.routers.orders import get_registry
 
 router = APIRouter(prefix="/account", tags=["account"])
-
-
-def _historical_price_lookup(registry: MarketRegistry) -> Callable[[str, object], "float | None"]:
-    """Builds the PriceLookup compute_equity_curve needs, from
-    SymbolMarket.price_history -- the SAME wall-clock-to-step mapping GET
-    /leaderboard already uses for its own `since` cutoff (one real second
-    per tick, app/main.py's MARKET_TICK_SECONDS=1.0; see
-    routers/leaderboard.py's _price_at_step and the cutoff computation in
-    get_leaderboard for the pattern this mirrors), so a fill's own
-    created_at maps back to "how many steps before the latest
-    price_history point that was."
-
-    Returns None for a symbol with no price_history at all (a synthetic
-    option contract, priced by app/options/execution.py against a live
-    spot only -- there is no historical series to look one up from) --
-    compute_equity_curve then falls back to that position's own average
-    entry price, the same honest fallback compute_account already uses
-    for current_prices.
-    """
-    now = datetime.now(timezone.utc)
-
-    def lookup(symbol: str, at) -> float | None:
-        market = registry.markets.get(symbol)
-        if market is not None:
-            history = market.price_history
-            step_count = market.step_count
-        elif symbol in DERIVED_INDICES:
-            history = registry.price_history_for(symbol).tolist()
-            step_count = len(history) - 1
-        else:
-            return None
-        if not history:
-            return None
-
-        at_utc = at if at.tzinfo is not None else at.replace(tzinfo=timezone.utc)
-        seconds_ago = (now - at_utc).total_seconds()
-        idx = max(0, min(step_count - int(seconds_ago), len(history) - 1))
-        return float(history[idx])
-
-    return lookup
 
 
 class PositionOut(BaseModel):
@@ -134,7 +92,7 @@ def get_equity_curve(
     # there's nothing to add there; the filter belongs at the call site.
     #
     # Genuinely mark-to-market (see accounting.EquityPoint's own
-    # docstring on why): _historical_price_lookup marks every open
+    # docstring on why): historical_price_lookup marks every open
     # position to price_history's own value at each fill's timestamp,
     # not just cumulative realized P&L -- this is what agrees with
     # GET /account's total_value at every point where no fill is pending.
@@ -143,7 +101,7 @@ def get_equity_curve(
         .filter(Order.user_id == user.id, Order.mode == Mode.paper, Order.sub_account_id.is_(None))
         .all()
     )
-    return compute_equity_curve(orders, price_lookup=_historical_price_lookup(registry))
+    return compute_equity_curve(orders, price_lookup=historical_price_lookup(registry))
 
 
 # --- Sub-accounts ------------------------------------------------------

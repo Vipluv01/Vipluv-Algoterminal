@@ -22,6 +22,25 @@ dependencies = [
     "pandas",
     "alembic",
     "nh3>=0.3.7",
+    # Phase 7 (Angel One SmartAPI live broker integration, app/broker/).
+    "smartapi-python",
+    "pyotp",  # TOTP code generation from the stored base32 seed -- see app/broker/angelone.py
+    # smartapi-python's own PyPI metadata (Requires-Dist) omits these two,
+    # but its source unconditionally imports both (SmartApi/smartConnect.py
+    # and smartWebSocketV2.py) -- confirmed by inspecting the actual wheel,
+    # not assumed. Without them listed here explicitly, `import SmartApi`
+    # raises ImportError on a clean install despite smartapi-python itself
+    # being present.
+    "websocket-client",
+    "logzero",
+    # Render deploy: DATABASE_URL can point at Postgres instead of the
+    # sqlite default (see app/db.py's own docstring). psycopg v3, not
+    # psycopg2-binary -- actively maintained, and its binary wheel needs
+    # no system libpq. app/db.py normalizes both "postgres://" and bare
+    # "postgresql://" to "postgresql+psycopg://" so this is the dialect
+    # that actually gets used regardless of which scheme DATABASE_URL
+    # arrives with.
+    "psycopg[binary]",
 ]
 
 [project.optional-dependencies]

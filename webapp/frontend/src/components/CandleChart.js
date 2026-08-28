@@ -4,6 +4,7 @@ import { html } from "../html.js";
 import { Modal } from "./Modal.js";
 import { SkeletonBlock } from "./Skeleton.js";
 import { api } from "../api.js";
+import { useMode } from "../mode.js";
 
 // 1s/5s were dropped in favor of the two longer timeframes the product
 // actually needs (30m/1hr) -- both of which are USELESS without the
@@ -11,12 +12,25 @@ import { api } from "../api.js";
 // otherwise take a full hour of live watching to draw its first bar. Keys
 // match GET /market/history's own `interval` enum (app/routers/market.py)
 // exactly, since a pane's interval key is sent there verbatim.
-const CANDLE_SECONDS_OPTIONS = { "1m": 60, "5m": 300, "30m": 1800, "1hr": 3600 };
-const DEFAULT_CANDLE_SECONDS = CANDLE_SECONDS_OPTIONS["1m"];
+const SIM_CANDLE_SECONDS_OPTIONS = { "1m": 60, "5m": 300, "30m": 1800, "1hr": 3600 };
+// Live mode's options are a DIFFERENT set, not a subset -- Angel One's
+// candle API only offers whole-minute-and-up granularity with its own
+// specific steps (1m/15m/1hr/1d), not 5m/30m, and does have a daily bar
+// paper/virtual have no equivalent of (see app/routers/live_market.py's
+// own module docstring). Matches GET /live/market/history's `interval`
+// enum exactly, for the same reason as the sim map above.
+const LIVE_CANDLE_SECONDS_OPTIONS = { "1m": 60, "15m": 900, "1hr": 3600, "1d": 86400 };
+
+function optionsForMode(mode) {
+  return mode === "live" ? LIVE_CANDLE_SECONDS_OPTIONS : SIM_CANDLE_SECONDS_OPTIONS;
+}
+
+const DEFAULT_CANDLE_SECONDS = SIM_CANDLE_SECONDS_OPTIONS["1m"]; // == LIVE's own "1m" too -- both maps agree on this one key
+
 const HISTORY_BARS = 300;
 
-function secondsToKey(secs) {
-  return Object.entries(CANDLE_SECONDS_OPTIONS).find(([, v]) => v === secs)?.[0];
+function secondsToKey(secs, mode) {
+  return Object.entries(optionsForMode(mode)).find(([, v]) => v === secs)?.[0];
 }
 
 const MAIN_INDICATORS = ["MA", "EMA", "BOLL", "SAR", "BBI"];
@@ -31,7 +45,7 @@ const SUB_INDICATORS = ["VOL", "MACD", "RSI", "KDJ"];
 // interval_ms), see market.py's _aggregate_bars docstring) specifically so
 // a live tick right after the seed extends the seed's own last bar instead
 // of gapping, duplicating, or misaligning with it.
-function useCandleAggregator(symbol, candleSeconds) {
+function useCandleAggregator(symbol, candleSeconds, mode) {
   const [loading, setLoading] = React.useState(true);
   const candlesRef = React.useRef([]);      // finalized candles
   const currentRef = React.useRef(null);     // in-progress candle
@@ -75,9 +89,13 @@ function useCandleAggregator(symbol, candleSeconds) {
   }, [applyToChart]);
 
   // Reset local aggregation AND re-seed from real history whenever the
-  // symbol OR the candle bucket size changes -- a 1m candle series built
-  // out of leftover 5m-bucketed local state (or a new instrument's ticks)
-  // would just be wrong, not merely coarser.
+  // symbol, the candle bucket size, OR the trading mode changes -- a 1m
+  // candle series built out of leftover 5m-bucketed local state (or a new
+  // instrument's ticks, or the OTHER data source's bars) would just be
+  // wrong, not merely coarser. Mode picks which history endpoint seeds
+  // the chart (simulated engine vs real Angel One candles) -- the live
+  // WS subscription itself is a separate concern, owned by whichever page
+  // calls subscribeMarketForMode, not this hook.
   React.useEffect(() => {
     let cancelled = false;
     candlesRef.current = [];
@@ -85,8 +103,9 @@ function useCandleAggregator(symbol, candleSeconds) {
     bucketStartRef.current = 0;
     setLoading(true);
 
-    const intervalKey = secondsToKey(candleSeconds);
-    api.market.history(symbol, intervalKey, HISTORY_BARS)
+    const intervalKey = secondsToKey(candleSeconds, mode);
+    const fetchHistory = mode === "live" ? api.live.history : api.market.history;
+    fetchHistory(symbol, intervalKey, HISTORY_BARS)
       .then((hist) => {
         if (cancelled) return;
         const bars = hist.bars.map((b) => ({
@@ -131,7 +150,7 @@ function useCandleAggregator(symbol, candleSeconds) {
 
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [symbol, candleSeconds]);
+  }, [symbol, candleSeconds, mode]);
 
   return { onTick, seedChart, loading };
 }
@@ -172,22 +191,35 @@ export function CandleChart({ symbol, price, height = "440px", stale = false, on
   // would tell every OTHER pane to move, including the original sender:
   // an infinite ping-pong across every synced pane.
   const applyingExternalSyncRef = React.useRef(false);
+  const mode = useMode();
+  const candleOptions = optionsForMode(mode);
   // initialIntervalKey can be stale (a value persisted to localStorage
   // before 1s/5s were dropped, e.g. Charts.js's PANES_KEY) -- an unknown
   // key falls back to DEFAULT_CANDLE_SECONDS rather than producing
   // `undefined` and silently breaking the aggregator's bucket math.
-  const [candleSeconds, setCandleSecondsRaw] = React.useState(CANDLE_SECONDS_OPTIONS[initialIntervalKey] || DEFAULT_CANDLE_SECONDS);
+  const [candleSeconds, setCandleSecondsRaw] = React.useState(candleOptions[initialIntervalKey] || DEFAULT_CANDLE_SECONDS);
   function setCandleSeconds(secs) {
     setCandleSecondsRaw(secs);
     if (onIntervalChange) {
-      const key = secondsToKey(secs);
+      const key = secondsToKey(secs, mode);
       if (key) onIntervalChange(key);
     }
   }
+  // The two interval sets aren't a subset of each other (live has 15m/1d,
+  // sim has 5m/30m) -- switching mode while sitting on a value the OTHER
+  // set doesn't have (e.g. 30m, then flipping to live) must snap to a
+  // valid one instead of silently asking the new data source for an
+  // interval it doesn't support.
+  React.useEffect(() => {
+    if (!Object.values(candleOptions).includes(candleSeconds)) {
+      setCandleSecondsRaw(DEFAULT_CANDLE_SECONDS);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
   const [active, setActive] = React.useState(() => new Set(["MA", "VOL"]));
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const [isFullscreen, setIsFullscreen] = React.useState(false);
-  const { onTick, seedChart, loading } = useCandleAggregator(symbol, candleSeconds);
+  const { onTick, seedChart, loading } = useCandleAggregator(symbol, candleSeconds, mode);
 
   React.useEffect(() => {
     const chart = init(containerId, {
@@ -285,7 +317,7 @@ export function CandleChart({ symbol, price, height = "440px", stale = false, on
     <div ref=${wrapRef} class="candle-wrap">
       <div class="candle-toolbar">
         <div class="toggle-row candle-timeframes">
-          ${Object.entries(CANDLE_SECONDS_OPTIONS).map(([label, secs]) => html`
+          ${Object.entries(candleOptions).map(([label, secs]) => html`
             <button key=${label} class=${`btn btn-sm ${candleSeconds === secs ? "active neutral" : ""}`}
                     onClick=${() => setCandleSeconds(secs)}>${label}</button>
           `)}

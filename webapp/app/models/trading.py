@@ -25,6 +25,15 @@ STARTING_PAPER_CASH = 100_000.0  # matches Bull's own convention (see opensoft-2
 
 class Mode(str, PyEnum):
     paper = "paper"
+    # Same simulated bourse engine/order flow as paper (see
+    # routers/orders.py's submit_order -- virtual and paper share the
+    # identical simulated-engine submission path, tagged differently),
+    # just a separate, much larger starting-capital ledger
+    # (accounting.STARTING_VIRTUAL_CASH_DEFAULT) for a user rehearsing
+    # position sizing at real-money scale before actually going live.
+    # NOT "real prices, fake money" -- see accounting.py's own docstring
+    # on why paper and virtual both stay on the simulated engine.
+    virtual = "virtual"
     live = "live"
 
 
@@ -281,16 +290,34 @@ class LiveBrokerCredential(Base):
     logged in plaintext. The encryption key itself lives in an environment
     variable (BROKER_CREDENTIAL_KEY), never in this database or in source
     control, so a stolen database file alone is not enough to recover a
-    user's real broker credentials."""
+    user's real broker credentials.
+
+    Phase 7 (Angel One SmartAPI) needs two fields this shape didn't
+    originally have -- client_code (SmartAPI's account/client id) and a
+    TOTP secret (the base32 seed used to generate a fresh 6-digit code on
+    every login, not a static value that can be sent as-is like a
+    password). Least-invasive extension: two new NULLABLE columns, both
+    encrypted the same way as every other secret here, rather than
+    reshaping the existing api_key/api_secret columns. For broker=
+    "angelone" specifically, encrypted_api_secret holds the account's
+    trading password/MPIN (SmartAPI has no separate "api secret" concept
+    the way Zerodha does -- this slot is repurposed for that, not left
+    unused) and encrypted_totp_secret holds the TOTP seed; both are
+    required for a real SmartAPI login (app/broker/angelone.py), enforced
+    there, not by a NOT NULL here -- a non-Angel-One broker row (or one
+    created before this field existed) has no reason to have either.
+    """
 
     __tablename__ = "live_broker_credentials"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True)
-    broker: Mapped[str] = mapped_column(String(32))  # "zerodha" | "groww"
+    broker: Mapped[str] = mapped_column(String(32))  # "angelone" | "zerodha" | "groww"
     encrypted_api_key: Mapped[bytes] = mapped_column(LargeBinary)
     encrypted_api_secret: Mapped[bytes] = mapped_column(LargeBinary)
     encrypted_access_token: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    encrypted_client_code: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    encrypted_totp_secret: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)

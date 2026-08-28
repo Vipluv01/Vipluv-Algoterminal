@@ -682,6 +682,27 @@ textarea.input { font-family: var(--font-ui); resize: vertical; min-height: 60px
 :root[data-mode="virtual"] .mode-strip { background: var(--violet); }
 :root[data-mode="live"] .mode-strip { background: var(--pnl-neg); box-shadow: 0 0 12px var(--pnl-neg); }
 
+/* Order-entry mode awareness -- the 3px .mode-strip above lives at the very
+   top of the viewport, which is easy to miss with your eyes on a ticket
+   further down the page. Every real order-entry surface (Terminal's
+   OrderEntry, Trade's SingleTicket/SpreadTicket) additionally renders
+   OrderModeBanner.js right at the top of its own panel, PLUS gets this
+   border treatment automatically via the shared .order-ticket-panel class
+   + the global data-mode attribute -- no per-component prop needed for
+   the border, so a future new ticket surface gets it for free just by
+   using the class. */
+.order-mode-banner {
+  padding: 8px 10px; border-radius: var(--radius-sm); font-size: 11.5px;
+  font-weight: 700; text-align: center; margin-bottom: 14px; line-height: 1.4;
+}
+.order-mode-banner-virtual { background: var(--violet-dim); color: var(--violet); border: 1px solid rgba(167,139,250,0.35); }
+.order-mode-banner-live { background: var(--pnl-neg-dim); color: var(--pnl-neg-bright); border: 1px solid rgba(226,88,58,0.45); }
+
+:root[data-mode="live"] .order-ticket-panel {
+  border-color: var(--pnl-neg); box-shadow: 0 0 0 1px var(--pnl-neg), 0 0 20px rgba(226,88,58,0.18);
+}
+:root[data-mode="virtual"] .order-ticket-panel { border-color: var(--violet); }
+
 .mode-switcher { position: relative; }
 .mode-dropdown {
   position: absolute; top: calc(100% + 6px); right: 0; z-index: 250; width: 240px;

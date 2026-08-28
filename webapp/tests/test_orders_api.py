@@ -27,11 +27,64 @@ def test_market_order_buy_fills_against_seed_liquidity(client):
     assert body["avg_fill_px"] is not None
 
 
-def test_live_mode_is_rejected_with_501(client):
+def test_live_mode_order_only_reaches_pending_confirmation_not_the_broker(client):
+    """Phase 7's two-step live flow: submitting mode="live" creates a
+    row and stops -- no broker call, no engine, no fill -- until a
+    separate POST /orders/{id}/confirm explicitly dispatches it (see
+    tests/test_live_broker.py for that step, mocked against
+    AngelOneAdapter rather than a real broker)."""
     resp = client.post("/orders", json={
-        "symbol": "ICICIBANK", "side": "buy", "order_type": "market", "qty": 5, "mode": "live",
+        "symbol": "RELIANCE", "side": "buy", "order_type": "market", "qty": 5, "mode": "live",
     })
-    assert resp.status_code == 501
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["mode"] == "live"
+    assert body["status"] == "pending_confirmation"
+    assert body["filled_qty"] == 0
+    assert body["broker_order_id"] is None
+    assert body["confirmed_at"] is None
+
+
+def test_live_mode_stop_loss_take_profit_is_rejected(client):
+    resp = client.post("/orders", json={
+        "symbol": "RELIANCE", "side": "buy", "order_type": "market", "qty": 5, "mode": "live",
+        "stop_loss_px": 100.0,
+    })
+    assert resp.status_code == 400
+
+
+def test_confirming_a_nonexistent_order_is_a_404(client):
+    resp = client.post("/orders/999999/confirm")
+    assert resp.status_code == 404
+
+
+def test_confirming_a_paper_order_is_rejected(client):
+    buy = client.post("/orders", json={
+        "symbol": "ICICIBANK", "side": "buy", "order_type": "market", "qty": 5,
+    }).json()
+    resp = client.post(f"/orders/{buy['id']}/confirm")
+    assert resp.status_code == 400
+
+
+def test_confirming_a_live_order_with_no_broker_credential_stored_is_a_400(client):
+    pending = client.post("/orders", json={
+        "symbol": "RELIANCE", "side": "buy", "order_type": "market", "qty": 5, "mode": "live",
+    }).json()
+    resp = client.post(f"/orders/{pending['id']}/confirm")
+    assert resp.status_code == 400
+    assert "credential" in resp.json()["detail"].lower()
+
+
+def test_cancelling_a_pending_confirmation_live_order_never_touches_the_broker(client):
+    pending = client.post("/orders", json={
+        "symbol": "RELIANCE", "side": "buy", "order_type": "market", "qty": 5, "mode": "live",
+    }).json()
+    resp = client.delete(f"/orders/{pending['id']}")
+    assert resp.status_code == 200
+
+    orders = client.get("/orders", params={"mode": "live"}).json()
+    cancelled = next(o for o in orders if o["id"] == pending["id"])
+    assert cancelled["status"] == "cancelled"
 
 
 def test_limit_order_without_price_is_rejected(client):
