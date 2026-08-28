@@ -4,3 +4,11 @@ __pycache__/
 .pytest_cache/
 *.db
 .env
+# e2e diff output and ad-hoc captures are generated build artifacts, not
+# source -- screenshots/baseline/ IS tracked: gap2_visual_diff.py's own
+# docstring says it diffs against "the frozen tests/e2e/screenshots/baseline/
+# committed here," so ignoring the whole directory would silently leave
+# that baseline uncommitted and the regression-diff tool with nothing to
+# compare against for anyone who clones this repo.
+tests/e2e/screenshots/diff/
+tests/e2e/screenshots/*.png

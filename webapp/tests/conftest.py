@@ -15,6 +15,11 @@ import os
 # deterministic, un-ticked book instead of racing a background timer.
 os.environ["DISABLE_MARKET_TICK"] = "1"
 
+# Each test builds its own in-memory schema below, so the app's startup
+# migration would only be running Alembic against the developer's real
+# on-disk algoterminal.db -- once per TestClient, i.e. once per test. Off.
+os.environ["DISABLE_AUTO_MIGRATE"] = "1"
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -42,5 +47,11 @@ def client():
 
     app.dependency_overrides[get_db] = override_get_db
     with TestClient(app) as c:
+        # Exposed for tests that need to manipulate DB state directly
+        # alongside API calls (e.g. forcing a RiskSettings.trading_halted
+        # flag to set up a scenario) -- app.db.SessionLocal would connect
+        # to the wrong database entirely here, since it's the real app's
+        # engine, untouched by this override.
+        c.db_session_factory = TestingSessionLocal
         yield c
     app.dependency_overrides.clear()

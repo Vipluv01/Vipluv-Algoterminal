@@ -192,10 +192,60 @@ class Engine:
         return (resp["px"], resp["qty"]) if resp.get("present") else None
 
     def mid(self) -> float | None:
+        """Fractional mid price, in ticks.
+
+        Costs two round trips (best_bid + best_ask) where the engine's own
+        `mid` op costs one -- but it is NOT the same number, so it is not
+        replaced by it. book.Mid() divides two integer Prices, truncating:
+        a book at bid=100/ask=101 gives 100 there and 100.5 here.
+
+        That half-tick matters. This value feeds MarketMaker.refresh_quotes
+        and the recorded price series that sim/stylized_facts.py measures,
+        and sim/KNOWN_ISSUES.md documents an OPEN investigation into the sign
+        of volatility clustering in exactly that series. Swapping in a
+        coarser mid mid-investigation would silently move the numbers the
+        ruled-out hypotheses there were ruled out against.
+
+        Use mid_ticks() when you want the engine's own definition.
+        """
         bid, ask = self.best_bid(), self.best_ask()
         if bid is None or ask is None:
             return None
         return (bid[0] + ask[0]) / 2.0
+
+    def mid_ticks(self) -> int | None:
+        """The engine's own mid, in whole ticks, in one round trip.
+
+        Truncated integer division -- see mid() for why the two coexist.
+        """
+        resp = self._call("mid")
+        return resp["value"] if resp.get("present") else None
+
+    def spread(self) -> int | None:
+        """Best ask minus best bid, in ticks. None if either side is empty."""
+        resp = self._call("spread")
+        return resp["value"] if resp.get("present") else None
+
+    def last_px(self) -> int | None:
+        """Price of the most recent trade, in ticks. None if nothing has traded.
+
+        Distinct from mid: this is where the book actually traded, which is
+        also what the price-collar risk check measures against.
+        """
+        resp = self._call("last_px")
+        return resp["value"] if resp.get("present") else None
+
+    def remaining(self, order_id: int) -> int | None:
+        """Unfilled quantity still resting for `order_id`, or None if the
+        order is not on the book (never accepted, fully filled, or cancelled).
+
+        Note the two cases are genuinely different and both reachable: a
+        return of 0 means the order is present but has nothing left, None
+        means it is gone. The wire protocol keeps them distinct via a
+        separate `present` flag rather than overloading zero.
+        """
+        resp = self._call("remaining", order_id=order_id)
+        return resp["value"] if resp.get("present") else None
 
     def depth(self, n: int = 10) -> tuple[list[PriceLevel], list[PriceLevel]]:
         resp = self._call("depth", depth=n)
@@ -220,3 +270,23 @@ class Engine:
         """
         resp = self._call("position", owner=owner)
         return resp["position"]
+
+    def stats(self) -> dict[str, int]:
+        """Cumulative book counters since this book was created.
+
+        Keys: trades, volume, live_orders, sequence, stp_cancels.
+
+        `volume` is cumulative, not per-step -- a caller wanting per-step
+        traded volume takes the difference between successive calls.
+        `stp_cancels` counts resting orders removed by self-trade prevention
+        rather than filled; it is the only signal that STP is doing anything
+        at all, and was tracked inside the engine but not exposed here.
+        """
+        resp = self._call("stats")
+        return {
+            "trades": resp.get("trades", 0),
+            "volume": resp.get("volume", 0),
+            "live_orders": resp.get("live_orders", 0),
+            "sequence": resp.get("sequence", 0),
+            "stp_cancels": resp.get("stp_cancels", 0),
+        }

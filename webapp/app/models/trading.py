@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum as PyEnum
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, LargeBinary, String
+from sqlalchemy import JSON, Boolean, DateTime, Enum, Float, ForeignKey, Integer, LargeBinary, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -49,6 +49,14 @@ class Side(str, PyEnum):
 class OrderType(str, PyEnum):
     limit = "limit"
     market = "market"
+    stop_limit = "stop_limit"  # bourse's engine has supported this since
+    # internal/book/stops.go; the REST layer just never exposed it. See
+    # Order.stop_px below.
+
+
+class InstrumentType(str, PyEnum):
+    equity = "equity"
+    option = "option"
 
 
 class PaperAccount(Base):
@@ -98,6 +106,12 @@ class Order(Base):
     order_type: Mapped[OrderType] = mapped_column(Enum(OrderType))
     qty: Mapped[int] = mapped_column(Integer)
     px: Mapped[float | None] = mapped_column(Float, nullable=True)  # null for market orders
+    # Trigger price for stop_limit orders only; null otherwise. The engine
+    # parks these in a separate tick-indexed book keyed by this value
+    # (internal/book/stops.go) and converts to a plain limit order once the
+    # trigger is crossed -- this column is only ever the ORIGINAL trigger,
+    # not updated when that conversion happens.
+    stop_px: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[OrderStatus] = mapped_column(Enum(OrderStatus), index=True)
     filled_qty: Mapped[int] = mapped_column(Integer, default=0)
     avg_fill_px: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -120,6 +134,46 @@ class Order(Base):
     # computed once for the trade decision and then thrown away.
     entry_zscore: Mapped[float | None] = mapped_column(Float, nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Set when this order is one child slice of an algorithmic parent
+    # order (app/execution/slicer.py) -- null for every ordinary manual or
+    # strategy-direct order, which is still the overwhelming majority.
+    parent_order_id: Mapped[int | None] = mapped_column(ForeignKey("parent_orders.id"), nullable=True)
+    # Set when this order was cloned for a specific sub-account
+    # (app/pairs_service.py's submit_paper_order) -- null means it belongs
+    # to the user's PRIMARY account, not a sub-account. Deliberately
+    # nullable rather than "0 = primary": a real sub-account row with id=0
+    # could never exist (autoincrement PKs start at 1), but relying on
+    # that coincidence to mean "primary" would be exactly the kind of
+    # implicit-sentinel bug this codebase's own "derive it, don't guess"
+    # discipline elsewhere warns against.
+    sub_account_id: Mapped[int | None] = mapped_column(ForeignKey("sub_accounts.id"), nullable=True)
+    # "equity" (default, every order before this phase) or "option" -- an
+    # option order's symbol is the FULL contract key (e.g.
+    # "BANKNIFTY26SEP52000CE", built by app/options/execution.py), not a
+    # NAMED_INSTRUMENTS ticker. Deliberately reusing this same `symbol`
+    # column (not a separate option-contract table) is what lets
+    # accounting._walk_fills price/position-track options with ZERO
+    # changes -- see app/options/execution.py's module docstring.
+    instrument_type: Mapped[InstrumentType] = mapped_column(
+        Enum(InstrumentType), default=InstrumentType.equity, server_default="equity",
+    )
+    # The remaining fields are null for every equity order and set
+    # together, atomically, for every option order -- they exist so other
+    # code (portfolio Greeks, mark-to-market, the options chain) can read
+    # a position's option identity back WITHOUT re-parsing the contract
+    # key out of `symbol`, which would be a fragile, ambiguous inverse of
+    # the formatting app/options/execution.py does once, forward, at
+    # order-creation time.
+    underlying: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    strike: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Stored as an unambiguous ISO date ("2026-09-26"), NOT the compact
+    # "26SEP" form the contract key itself uses -- the key's own format
+    # (matching NSE convention) drops the year, which is fine for a
+    # human-readable symbol but not for computing time-to-expiry.
+    expiry: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    option_type: Mapped[str | None] = mapped_column(String(2), nullable=True)  # "CE" | "PE"
+    lot_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    multiplier: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
 
@@ -165,6 +219,28 @@ class Bracket(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class SubAccount(Base):
+    """A named, weighted slice of a user's paper trading -- "run this same
+    strategy signal at 2x size in an 'aggressive' book and 0.5x in a
+    'conservative' one," without needing two separate logins or two
+    separate strategy runs. Every sub-account order is a real, independent
+    Order row (Order.sub_account_id) that flows through the SAME
+    accounting.compute_account/_walk_fills as the primary account -- a
+    sub-account is a FILTER on existing orders, not a second accounting
+    implementation (Order.sub_account_id is null = a filter that never
+    matches = the primary account's own orders, unaffected by any of
+    this)."""
+
+    __tablename__ = "sub_accounts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    label: Mapped[str] = mapped_column(String(64))
+    sizing_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class JournalNote(Base):
     """Free-text trade journal entries, the "Notes" tab in the Dashboard
     view (see the plan / reviewed screenshots). Deliberately just a
@@ -176,8 +252,27 @@ class JournalNote(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    # Sanitized server-side (app.routers.journal, via nh3) before ever
+    # reaching this column -- the frontend renders this text as markdown
+    # through `marked`, which does NOT escape raw HTML by default, so this
+    # is user-authored content rendered back into the page and must be
+    # safe BEFORE storage, not just at render time.
     text: Mapped[str] = mapped_column(String(2000))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    # list[str], nullable rather than defaulting to [] -- None means "never
+    # tagged," distinct from an empty list a caller explicitly cleared.
+    tags: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Optional trade link -- a note doesn't have to reference a specific
+    # Order (matching the free-text "summarize a session" notes this table
+    # already held before this phase), but when it does, this is which one.
+    trade_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"), nullable=True)
+    # A SNAPSHOT, not a live figure -- the account's net realized P&L at
+    # the MOMENT this note was written, computed once in
+    # app.routers.journal.create_note and frozen here. Deliberately not
+    # recomputed on read: a note from three weeks ago should still show
+    # what P&L looked like when it was written, not silently reflect
+    # today's number every time the journal is opened.
+    pnl_snapshot: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class LiveBrokerCredential(Base):

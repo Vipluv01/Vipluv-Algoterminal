@@ -8,8 +8,18 @@ live demo's own order tracking earlier this session).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable
 
 from app.models.trading import Order, OrderStatus, Side
+
+# symbol, created_at (an Order's own field, left untyped here the same way
+# Order.created_at is below) -> a historical mark for that symbol at that
+# moment, or None when this lookup has no historical price for it (e.g. a
+# synthetic option contract, which has no price_history -- see
+# app/routers/account.py's own price-lookup builder). None means "fall
+# back to that position's own average entry price," the same honest
+# "no live price" fallback compute_account already uses for current_prices.
+PriceLookup = Callable[[str, object], "float | None"]
 
 STARTING_PAPER_CASH_DEFAULT = 100_000.0
 
@@ -50,15 +60,35 @@ class TradeRealization:
 
 
 @dataclass(frozen=True)
-class EquityPoint:
+class RealizedPnlPoint:
     """starting_cash + cumulative realized P&L as of this fill --
-    deliberately NOT cash + live mark-to-market (that would need a real
-    price at every past moment this curve passes through, which nothing
-    records). This is "closed-book" equity: it moves only when a trade
-    actually realizes P&L, so it's real and reconstructible from Order
-    history alone, at the cost of not reflecting an open position's
-    paper gain/loss between fills -- an honest tradeoff, not an
-    approximation dressed up as a live equity curve."""
+    deliberately NOT cash + live mark-to-market. This is Portfolio IQ's
+    walk (app/routers/portfolio.py), kept realized-only ON PURPOSE:
+    Brinson-Fachler attribution wants clean per-period realized returns,
+    not mark-to-market noise from an open position's paper gain/loss
+    between fills. Named `realized_pnl`, never `equity` -- see
+    EquityPoint below for the genuine mark-to-market curve, and why the
+    two must never share a label that lets them be read as disagreeing
+    with each other."""
+
+    order_id: int
+    created_at: object
+    realized_pnl: float
+
+
+@dataclass(frozen=True)
+class EquityPoint:
+    """Genuine mark-to-market equity as of this fill: cash plus every
+    then-open position valued at SymbolMarket.price_history's own value
+    at that fill's timestamp (via the caller-supplied PriceLookup),
+    falling back to that position's own average entry price when no
+    historical mark exists for the symbol (e.g. a synthetic option
+    contract). This is what GET /account/equity-curve exposes, and it
+    now agrees with accounting.total_value at any point where no fill is
+    pending -- the two used to disagree by exactly the unrealized P&L of
+    every open position, which is what motivated this fix. Contrast with
+    RealizedPnlPoint above, which is a deliberately different, realized-
+    only curve for a different consumer (Portfolio IQ)."""
 
     order_id: int
     created_at: object
@@ -72,6 +102,7 @@ class _WalkResult:
     avg_px: dict[str, float] = field(default_factory=dict)
     realized_by_symbol: dict[str, float] = field(default_factory=dict)
     realizations: list[TradeRealization] = field(default_factory=list)
+    realized_pnl_points: list[RealizedPnlPoint] = field(default_factory=list)
     equity_points: list[EquityPoint] = field(default_factory=list)
 
 
@@ -80,13 +111,21 @@ def _filled_orders_only(orders: list[Order]) -> list[Order]:
             if o.status in (OrderStatus.filled, OrderStatus.partially_filled) and o.filled_qty > 0]
 
 
-def _walk_fills(orders: list[Order], starting_cash: float) -> _WalkResult:
+def _walk_fills(orders: list[Order], starting_cash: float, price_lookup: PriceLookup | None = None) -> _WalkResult:
     """Single shared pass over every fill in chronological order,
     maintaining running qty/avg-entry-price/realized-P&L per symbol via
-    standard weighted-average-cost accounting -- both compute_account and
-    compute_realizations are thin views over this same walk, so the
-    close/flip/partial-reduce logic exists in exactly one place rather
-    than risking two accounting implementations drifting apart.
+    standard weighted-average-cost accounting -- compute_account,
+    compute_realizations, and compute_realized_pnl_curve are all thin
+    views over this same walk, so the close/flip/partial-reduce logic
+    exists in exactly one place rather than risking accounting
+    implementations drifting apart.
+
+    price_lookup, when given, additionally marks every then-open position
+    to its historical price AT THIS FILL'S OWN TIMESTAMP after each fill,
+    populating result.equity_points (compute_equity_curve's mark-to-market
+    curve) alongside the always-computed realized_pnl_points. Omitted by
+    every caller that only wants the realized-only view, so they don't
+    pay for a price lookup they never use.
     """
     result = _WalkResult(cash=starting_cash)
     running_realized = 0.0
@@ -133,13 +172,26 @@ def _walk_fills(orders: list[Order], starting_cash: float) -> _WalkResult:
 
         result.qty[sym] = new_qty
         # A point after EVERY fill, not just realizing ones -- an opening
-        # fill leaves equity unchanged (running_realized doesn't move),
-        # which is correct: the curve should read flat while a position
-        # is simply being held/built, not silently skip that stretch of
-        # real trading activity.
-        result.equity_points.append(EquityPoint(
-            order_id=o.id, created_at=o.created_at, equity=starting_cash + running_realized,
+        # fill leaves realized_pnl unchanged (running_realized doesn't
+        # move), which is correct: the curve should read flat while a
+        # position is simply being held/built, not silently skip that
+        # stretch of real trading activity.
+        result.realized_pnl_points.append(RealizedPnlPoint(
+            order_id=o.id, created_at=o.created_at, realized_pnl=starting_cash + running_realized,
         ))
+
+        if price_lookup is not None:
+            mark_to_market = result.cash
+            for pos_sym, pos_qty in result.qty.items():
+                if pos_qty == 0:
+                    continue
+                mark = price_lookup(pos_sym, o.created_at)
+                if mark is None:
+                    mark = result.avg_px[pos_sym]
+                mark_to_market += pos_qty * mark
+            result.equity_points.append(EquityPoint(
+                order_id=o.id, created_at=o.created_at, equity=mark_to_market,
+            ))
 
     return result
 
@@ -148,7 +200,28 @@ def compute_account(
     orders: list[Order],
     current_prices: dict[str, float],
     starting_cash: float = STARTING_PAPER_CASH_DEFAULT,
+    *,
+    sub_account_id: int | None = None,
+    only_primary: bool = False,
 ) -> AccountSnapshot:
+    """sub_account_id, when given, restricts the walk to orders tagged
+    with exactly that sub-account (app/models/trading.py's
+    Order.sub_account_id) -- a sub-account is a FILTER over the same
+    order history every other view of this account already uses, not a
+    second accounting implementation with its own starting cash or fill
+    logic. only_primary=True is the complementary filter: orders with NO
+    sub_account_id at all (the user's own primary book), for a caller
+    that wants the primary account's numbers to exclude every sub-
+    account's activity -- passing neither argument preserves the
+    original behavior exactly (every order, regardless of sub-account).
+    """
+    if sub_account_id is not None and only_primary:
+        raise ValueError("sub_account_id and only_primary are mutually exclusive")
+    if sub_account_id is not None:
+        orders = [o for o in orders if o.sub_account_id == sub_account_id]
+    elif only_primary:
+        orders = [o for o in orders if o.sub_account_id is None]
+
     w = _walk_fills(orders, starting_cash)
 
     positions: dict[str, SymbolPosition] = {}
@@ -178,8 +251,23 @@ def compute_realizations(orders: list[Order], starting_cash: float = STARTING_PA
     return _walk_fills(orders, starting_cash).realizations
 
 
-def compute_equity_curve(orders: list[Order], starting_cash: float = STARTING_PAPER_CASH_DEFAULT) -> list[EquityPoint]:
-    """One point per fill, chronological -- see EquityPoint's own
+def compute_realized_pnl_curve(
+    orders: list[Order], starting_cash: float = STARTING_PAPER_CASH_DEFAULT,
+) -> list[RealizedPnlPoint]:
+    """One point per fill, chronological -- see RealizedPnlPoint's own
     docstring for exactly what this does and doesn't represent (realized
-    equity, not live mark-to-market)."""
-    return _walk_fills(orders, starting_cash).equity_points
+    P&L, not live mark-to-market). This is Portfolio IQ's walk
+    (app/routers/portfolio.py) -- GET /account/equity-curve wants
+    compute_equity_curve below instead."""
+    return _walk_fills(orders, starting_cash).realized_pnl_points
+
+
+def compute_equity_curve(
+    orders: list[Order], price_lookup: PriceLookup, starting_cash: float = STARTING_PAPER_CASH_DEFAULT,
+) -> list[EquityPoint]:
+    """One point per fill, chronological, genuinely mark-to-market -- see
+    EquityPoint's own docstring. price_lookup is required (not defaulted
+    to None) so a caller can't silently get an all-fallback-to-avg-entry-
+    price curve by forgetting to pass one; app/routers/account.py builds
+    a real one from SymbolMarket.price_history."""
+    return _walk_fills(orders, starting_cash, price_lookup=price_lookup).equity_points

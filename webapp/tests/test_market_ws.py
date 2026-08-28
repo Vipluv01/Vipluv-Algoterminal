@@ -1,11 +1,18 @@
-from app.markets import NAMED_INSTRUMENTS
+from app.markets import DERIVED_INDICES, NAMED_INSTRUMENTS
 
 
 def test_symbols_endpoint_lists_the_named_instruments(client):
     resp = client.get("/symbols")
     assert resp.status_code == 200
-    symbols = {row["symbol"] for row in resp.json()}
-    assert symbols == set(NAMED_INSTRUMENTS.keys())
+    rows = {row["symbol"]: row for row in resp.json()}
+    # Every real, simulated equity, PLUS the derived index baskets
+    # (app/markets.py's DERIVED_INDICES, phase 5) -- this endpoint now
+    # covers both, distinguished by is_derived.
+    assert set(rows) == set(NAMED_INSTRUMENTS.keys()) | set(DERIVED_INDICES.keys())
+    for symbol in NAMED_INSTRUMENTS:
+        assert rows[symbol]["is_derived"] is False
+    for symbol in DERIVED_INDICES:
+        assert rows[symbol]["is_derived"] is True
 
 
 def test_market_ws_sends_an_immediate_snapshot_on_connect(client):
@@ -33,6 +40,31 @@ def test_market_ws_prices_are_in_currency_not_raw_ticks(client):
         assert 500 < msg["best_bid"] < 3000
         assert 500 < msg["best_ask"] < 3000
         assert 500 < msg["bids"][0]["px"] < 3000
+
+
+def test_market_ws_streams_a_derived_index(client):
+    """Regression test for a real bug: the WebSocket gate only checked
+    NAMED_INSTRUMENTS, so NIFTY50/BANKNIFTY (DERIVED_INDICES) were closed
+    immediately on connect (code 4404) and their charts never received a
+    single tick. A derived index has no real order book, so best_bid/
+    best_ask/bids/asks must come back empty/None -- honest about there
+    being no matched instrument behind it -- while price is still real."""
+    with client.websocket_connect("/ws/market/NIFTY50") as ws:
+        msg = ws.receive_json()
+        assert msg["type"] == "tick"
+        assert msg["symbol"] == "NIFTY50"
+        assert msg["price"] > 0
+        assert msg["best_bid"] is None
+        assert msg["best_ask"] is None
+        assert msg["bids"] == []
+        assert msg["asks"] == []
+
+
+def test_market_ws_streams_bank_nifty_too(client):
+    with client.websocket_connect("/ws/market/BANKNIFTY") as ws:
+        msg = ws.receive_json()
+        assert msg["symbol"] == "BANKNIFTY"
+        assert msg["price"] > 0
 
 
 def test_market_ws_rejects_an_unknown_symbol(client):

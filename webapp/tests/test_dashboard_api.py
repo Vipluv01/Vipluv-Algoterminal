@@ -39,36 +39,5 @@ def test_calendar_starts_empty(client):
     assert resp.json() == []
 
 
-def test_create_list_and_delete_a_note(client):
-    create = client.post("/dashboard/notes", json={"text": "Closed all ICICI before the weekend."})
-    assert create.status_code == 200, create.text
-    note = create.json()
-    assert note["text"] == "Closed all ICICI before the weekend."
-
-    listing = client.get("/dashboard/notes").json()
-    assert len(listing) == 1
-    assert listing[0]["id"] == note["id"]
-
-    delete = client.delete(f"/dashboard/notes/{note['id']}")
-    assert delete.status_code == 200
-
-    listing_after = client.get("/dashboard/notes").json()
-    assert listing_after == []
-
-
-def test_empty_note_text_is_rejected(client):
-    resp = client.post("/dashboard/notes", json={"text": "   "})
-    assert resp.status_code == 400
-
-
-def test_deleting_a_nonexistent_note_is_a_404(client):
-    resp = client.delete("/dashboard/notes/99999")
-    assert resp.status_code == 404
-
-
-def test_notes_are_newest_first(client):
-    client.post("/dashboard/notes", json={"text": "first"})
-    client.post("/dashboard/notes", json={"text": "second"})
-    listing = client.get("/dashboard/notes").json()
-    assert listing[0]["text"] == "second"
-    assert listing[1]["text"] == "first"
+# Journal notes (formerly /dashboard/notes) moved to their own screen and
+# their own test file -- see tests/test_journal_api.py.

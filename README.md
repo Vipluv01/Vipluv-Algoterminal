@@ -10,41 +10,94 @@ the first.
 
 ## Results
 
-Measured on an Apple M5 (10-core), `go test ./bench/... -bench . -benchmem`.
+<!-- BEGIN GENERATED RESULTS -->
 
-**Throughput:** ~5.5M ops/sec sustained, under realistic mixed order flow
-across 200 distinct synthetic participants (limit, market, stop-limit, and
-cancel — see [Workload](#workload) below), **zero heap allocations per
-operation** on the hot path.
+Measured on an Apple M5 (10-core). Every figure below is generated from
+`results/latency.json`, `results/throughput.json`, and
+`results/latency_stability.json` by `go test ./bench/...` — this section of
+the README is written by the benchmark, not by hand, and a test fails the
+build if the two disagree.
 
-**Latency**, broken out by operation type (nanoseconds):
+### Throughput
+
+**4.54M ops/sec** sustained (220.3 ns/op) under realistic mixed order flow
+across 200 synthetic participants — 15,663,205 submits and 11,336,795 cancels, measured
+against a book holding **2,255,203 resting orders**.
+
+That book depth is quoted deliberately: throughput here is not a single
+number. Cost per operation climbs as resting orders accumulate, so an
+unqualified ops/sec figure is only true of whichever run length produced
+it. The full curve:
+
+| operations | resting orders | ns/op | ops/sec |
+|---|---|---|---|
+| 900,000 | 74,391 | 144.1 | 6.94M |
+| 4,500,000 | 375,193 | 192.8 | 5.19M |
+| 9,000,000 | 746,792 | 217.1 | 4.61M |
+| 27,000,000 | 2,255,203 | 220.3 | 4.54M |
+
+The headline is the last row — the deepest book measured, and so the most
+conservative of them.
+
+**Allocations: 16 total across 27,000,000 operations** (4.41 B/op amortized). This is
+counted with `runtime.ReadMemStats`, not read off `-benchmem`, because
+`-benchmem` reports allocs/op as an integer and prints anything below one
+per operation as a flat `0 allocs/op` — which is how a README ends up
+claiming a hard zero. The real number is small and non-zero: a handful of
+buffer growths, amortized to effectively nothing, but not literally none.
+
+### Latency
+
+Nanoseconds, by operation type, batch-timed (see *Why the numbers can be
+trusted* below for why batching is necessary here):
 
 | | p50 | p90 | p99 | p99.9 | p99.99 | max |
 |---|---|---|---|---|---|---|
-| **submit** | 72 | 84 | 109 | 276 | 2,720 | 4,899 |
-| **cancel** | 19 | 23 | 31 | 80 | 230 | 351 |
-| **sweep** (crosses 3+ levels) | 89 | 119 | 144 | 312 | 1,080 | 17,518 |
+| **submit** | 80 | 95 | 119 | 360 | 2,960 | 4,826 |
+| **cancel** | 19 | 23 | 27 | 70 | 294 | 335 |
+| **sweep** | 123 | 170 | 225 | 544 | 1,656 | 27,941 |
 
-Regenerate with `go test ./bench/... -run TestLatencyReport -v`, which also
-rewrites `results/latency.json` — the numbers above are read from that file,
-not typed in by hand, so they can't drift out of sync with what the code
-actually measures.
+*sweep = an aggressive order crossing 3+ price levels.*
 
-**Read past p99 before trusting these.** Cancel is consistently the
-cheapest operation (a pure O(1) unlink, no matching involved) — roughly 4x
-faster than submit at the median, same shape as before self-trade
-prevention was added. What changed is which operation has the worse
-*relative* tail: **submit's p99.99 is now ~38x its own median**, while
-sweep's is ~12x — the reverse of an earlier measurement of this engine.
-The likely cause: a submit that turns out to collide with a same-owner
-resting order now takes the self-trade-prevention path (cancel the resting
-order, then keep walking) instead of a plain match, and that extra
-book-mutation work is exactly the kind of rare, structurally different case
-that shows up in a tail rather than the average. Sweep's tail, by contrast,
-is dominated by how many levels a given walk happens to cross, which is a
-smoother, more evenly-distributed cost — hence the flatter relative tail.
-This is exactly the sort of thing a percentile breakdown is for: a single
-mean would have hidden it completely.
+### Which of these numbers actually reproduce
+
+Not all of them, and the difference matters more than the values.
+Across **5 independent runs** of 2,000,000 operations each, here is how far each
+statistic moved (max ÷ min):
+
+| | p50 | p90 | p99 | p99.9 | p99.99 | max |
+|---|---|---|---|---|---|---|
+| **submit** | 1.11x | 1.15x | 1.74x | 1.97x | 4.89x | 2.58x |
+| **cancel** | 1.05x | 1.09x | 2.58x | 5.64x | 13.07x | 24.84x |
+| **sweep** | 1.08x | 1.06x | 1.97x | 2.50x | 2.22x | 1.33x |
+
+**Up to p99 these reproduce; past it they do not.** Every statistic through
+p99 stays within 2.58x of itself across runs — median submit cost lands in
+75–83ns and sweep in 119–128ns, tight enough to quote as figures. Past p99 the
+spread widens to 24.84x, which is more than enough to reverse a ranking built
+on it.
+
+This is worth stating plainly because an earlier version of this README did
+build such a ranking — it explained at length why submit's relative tail was
+worse than sweep's and attributed the cause to the self-trade-prevention
+path. That comparison also depends on which tail statistic you pick: by
+p99.99 submit's tail is the larger multiple of its own median, but by `max`
+sweep's is, by a wide margin. A single run cannot distinguish a real
+structural difference from sampling noise at these percentiles, so the
+explanation has been withdrawn rather than restated. What the tail does
+support: cancel is consistently the cheapest operation at the median (a pure
+O(1) unlink, no matching), and sweep's worst case is consistently the
+largest absolute outlier, which is what you would expect from an operation
+whose cost scales with how many levels it happens to cross.
+
+<!-- END GENERATED RESULTS -->
+
+Regenerate everything above with:
+
+```bash
+BOURSE_REGEN=1 go test ./bench/... -run Report            # refresh results/*.json
+BOURSE_UPDATE_README=1 go test ./bench/... -run Readme    # rewrite this section
+```
 
 ## Why the numbers can be trusted
 

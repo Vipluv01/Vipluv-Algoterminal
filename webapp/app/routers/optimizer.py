@@ -17,7 +17,8 @@ from app.models.trading import Mode, Order
 from app.models.user import User
 from app.optimizer_returns import MIN_TRADING_DAYS, build_daily_return_series
 from app.portfolio_optimizer import max_sharpe_allocation
-from app.strategy_runner import PAIRS_STRATEGY_KEY, SINGLE_INSTRUMENT_STRATEGIES
+from app.pairs_service import PAIRS_STRATEGY_KEY
+from app.strategy_runner import SINGLE_INSTRUMENT_STRATEGIES
 
 router = APIRouter(prefix="/optimizer", tags=["optimizer"])
 
