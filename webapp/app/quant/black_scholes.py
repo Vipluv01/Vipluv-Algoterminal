@@ -16,8 +16,6 @@ import math
 from dataclasses import dataclass
 from typing import Literal
 
-from scipy.stats import norm
-
 OptionType = Literal["CE", "PE"]  # NSE convention: CE = call, PE = put
 
 DAYS_PER_YEAR = 365.0  # theta is quoted per CALENDAR day, not trading day --
@@ -43,6 +41,13 @@ def bsm_price(S: float, K: float, T: float, r: float, sigma: float, option_type:
     """European option theoretical price. S=spot, K=strike, T=time to
     expiry in years, r=risk-free rate (annualized, continuously
     compounded), sigma=annualized volatility."""
+    # Imported here, not at module top level, so a process that never
+    # actually prices an option (e.g. one still running its Postgres
+    # migrations at startup) never pays scipy's real import weight for it
+    # -- see the Render memory investigation this came out of. Cheap after
+    # the first call: once scipy.stats is in sys.modules, this is just a
+    # dict lookup, not a re-import.
+    from scipy.stats import norm
     d1, d2 = _d1_d2(S, K, T, r, sigma)
     disc_K = K * math.exp(-r * T)
     if option_type == "CE":
@@ -71,6 +76,7 @@ def bsm_greeks(S: float, K: float, T: float, r: float, sigma: float, option_type
     percentage point) derivative is not a number anyone reasons about
     directly.
     """
+    from scipy.stats import norm  # see bsm_price's own comment on why this is lazy
     d1, d2 = _d1_d2(S, K, T, r, sigma)
     disc_K = K * math.exp(-r * T)
     pdf_d1 = norm.pdf(d1)

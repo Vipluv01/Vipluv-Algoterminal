@@ -24,7 +24,6 @@ import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
-from statsmodels.tsa.vector_ar.vecm import coint_johansen
 
 from app.strategies.base import Signal
 from app.strategies.pairs_cointegration import PairPosition
@@ -68,6 +67,11 @@ def _johansen_top_eigenvector(prices_matrix: np.ndarray) -> tuple[bool, np.ndarr
     convention on the 2-series case) -- at least one cointegrating
     relationship exists among the three series, not just correlation.
     """
+    # Lazy import -- see pairs_cointegration.py's own comment on this
+    # exact pattern (statsmodels import weight deferred off process
+    # startup, cheap on every call after the first).
+    from statsmodels.tsa.vector_ar.vecm import coint_johansen
+
     with warnings.catch_warnings():
         # See app/quant/stationarity.py's johansen_test for why this
         # specific warning is suppressed: a real, verified-harmless numpy

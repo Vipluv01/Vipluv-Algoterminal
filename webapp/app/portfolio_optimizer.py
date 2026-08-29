@@ -23,7 +23,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.optimize import minimize
 
 
 @dataclass(frozen=True)
@@ -107,6 +106,12 @@ def _slsqp_allocation(
     lucky one -- verified directly in tests/test_portfolio_optimizer.py,
     not just asserted here.
     """
+    # Lazy, not module top-level -- scipy is real import weight (Render
+    # memory investigation) a process that never actually runs the
+    # optimizer (most requests won't) shouldn't pay for. Cheap on every
+    # call after the first: scipy.optimize is cached in sys.modules by then.
+    from scipy.optimize import minimize
+
     n = len(mean_periodic)
 
     def negative_sharpe(w: np.ndarray) -> float:

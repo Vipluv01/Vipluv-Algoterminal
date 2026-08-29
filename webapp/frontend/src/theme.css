@@ -826,6 +826,12 @@ textarea.input { font-family: var(--font-ui); resize: vertical; min-height: 60px
 .conn-dot.connecting { background: var(--warn); animation: pulse 1s ease-in-out infinite; }
 .conn-dot.reconnecting { background: var(--warn); animation: pulse .6s ease-in-out infinite; }
 .conn-dot.offline { background: var(--pnl-neg); }
+/* Circuit breaker gave up (api.js's live-feed reconnect ceiling) -- a
+   genuine stopped state, not "still trying, just down" (.offline still
+   implies reconnect attempts continue in the background). Same static
+   red as .offline (no pulse, since nothing is actively retrying) plus a
+   ring to read as more deliberate than a plain drop. */
+.conn-dot.disconnected { background: var(--pnl-neg); box-shadow: 0 0 0 2px rgba(226,88,58,0.35); }
 @media (prefers-reduced-motion: reduce) {
   .conn-dot.live, .conn-dot.connecting, .conn-dot.reconnecting { animation: none; }
 }

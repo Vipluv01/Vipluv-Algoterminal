@@ -5,7 +5,7 @@ docstring)."""
 
 from __future__ import annotations
 
-from app.broker.angelone import AngelOneAuthError
+from app.broker.angelone import AngelOneAuthError, AngelOneError
 
 
 class _StubAdapter:
@@ -21,6 +21,25 @@ class _StubAdapter:
 
     def search_symbol_token(self, exchange, query):
         return self.symbol_matches
+
+    def resolve_equity_symbol(self, exchange, symbol):
+        # Mirrors AngelOneAdapter.resolve_equity_symbol's own filtering
+        # exactly, over this stub's own symbol_matches -- a test double
+        # for the real method, not a shortcut around it.
+        matches = self.search_symbol_token(exchange, symbol)
+        expected = f"{symbol.upper()}-EQ"
+        equity_matches = [
+            m for m in matches
+            if m.get("exchange") == "NSE" and str(m.get("tradingsymbol", "")).upper() == expected
+        ]
+        if not equity_matches:
+            raise AngelOneError(
+                f"could not resolve {symbol!r} to a standard NSE equity instrument "
+                f"(found {len(matches)} matching series, none an exact {expected!r} match)"
+            )
+        if len(equity_matches) > 1:
+            raise AngelOneError(f"symbol {symbol!r} matched more than one NSE equity entry -- refusing to guess")
+        return equity_matches[0]
 
     def get_historical_candles(self, **kwargs):
         self.last_candle_params = kwargs
@@ -48,12 +67,48 @@ def test_live_history_with_no_broker_credential_is_a_400(client):
     assert resp.status_code == 400
 
 
-def test_live_history_unknown_symbol_is_a_404(client, monkeypatch):
+def test_live_history_unknown_symbol_is_a_clean_502_not_a_wrong_instrument(client, monkeypatch):
     stub = _StubAdapter(symbol_matches=[])
     monkeypatch.setattr("app.routers.live_market.get_adapter_for_user", lambda db, user_id: stub)
 
     resp = client.get("/live/market/history", params={"symbol": "NOTAREALSYMBOL"})
-    assert resp.status_code == 404
+    assert resp.status_code == 502
+    assert "NOTAREALSYMBOL" in resp.json()["detail"]
+
+
+# Exactly what searchScrip("NSE", "SBIN") returned against a real Angel
+# One account (captured live) -- 14 series, only one (SBIN-EQ) the actual
+# stock. Also exercises the subtler part of the bug: SBINEQWETF-*/
+# SBINMID150-* are DIFFERENT tickers that happen to contain "SBIN" as a
+# substring (searchScrip does substring search) AND their own "-EQ" entry
+# also ends in "-EQ" -- so a naive "ends with -EQ" filter is not enough
+# either; it would find three -EQ-suffixed entries here, not one.
+REAL_SBIN_SEARCH_RESULTS = [
+    {"exchange": "NSE", "tradingsymbol": t, "symboltoken": str(100 + i)}
+    for i, t in enumerate([
+        "SBIN-AF", "SBIN-BE", "SBIN-BL", "SBIN-EQ", "SBIN-IQ", "SBIN-RL", "SBIN-U3", "SBIN-U4",
+        "SBINEQWETF-BL", "SBINEQWETF-EQ", "SBINEQWETF-RL",
+        "SBINMID150-BL", "SBINMID150-EQ", "SBINMID150-RL",
+    ])
+]
+SBIN_EQ_TOKEN = next(m["symboltoken"] for m in REAL_SBIN_SEARCH_RESULTS if m["tradingsymbol"] == "SBIN-EQ")
+
+
+def test_live_history_never_takes_the_first_match_when_it_is_not_the_equity_series(client, monkeypatch):
+    """Regression test for a real bug found live against a real Angel One
+    account, using the exact captured result set (see
+    REAL_SBIN_SEARCH_RESULTS above). matches[0] (SBIN-AF) is not the
+    actual stock, and a naive "ends with -EQ" filter is ALSO wrong here
+    (SBINEQWETF-EQ and SBINMID150-EQ both end in -EQ too) -- only an
+    EXACT "SBIN-EQ" match is safe. This is a real-money-safety bug for the
+    order-confirm path (see test_live_broker.py's own version) and a
+    correctness bug here: showing chart data for the wrong instrument."""
+    stub = _StubAdapter(symbol_matches=REAL_SBIN_SEARCH_RESULTS)
+    monkeypatch.setattr("app.routers.live_market.get_adapter_for_user", lambda db, user_id: stub)
+
+    resp = client.get("/live/market/history", params={"symbol": "SBIN"})
+    assert resp.status_code == 200, resp.text
+    assert stub.last_candle_params["symboltoken"] == SBIN_EQ_TOKEN
 
 
 def test_live_history_respects_the_limit_ceiling(client):

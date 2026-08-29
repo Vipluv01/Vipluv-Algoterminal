@@ -246,10 +246,12 @@ def confirm_live_order(
         raise HTTPException(status_code=400, detail=str(e))
 
     try:
-        matches = adapter.search_symbol_token("NSE", order.symbol)
-        if not matches:
-            raise AngelOneError(f"could not resolve a symboltoken for symbol {order.symbol!r} on NSE")
-        match = matches[0]
+        # resolve_equity_symbol, not search_symbol_token + matches[0] --
+        # a real-money-safety bug found live: matches[0] is not guaranteed
+        # to be the equity entry (e.g. SBIN's search returns 14 series,
+        # matches[0] would have been SBIN-AF, not the actual stock). See
+        # AngelOneAdapter.resolve_equity_symbol's own docstring.
+        match = adapter.resolve_equity_symbol("NSE", order.symbol)
         broker_order_id = adapter.place_order(
             symbol=match.get("tradingsymbol", order.symbol), symboltoken=match["symboltoken"],
             exchange=match.get("exchange", "NSE"), side=order.side.value, qty=order.qty,

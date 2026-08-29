@@ -198,11 +198,65 @@ class AngelOneAdapter:
         SmartAPI's own searchScrip finds (each item has at least exchange/
         tradingsymbol/symboltoken), so a caller can resolve a human symbol
         to the symboltoken every other call below needs, without this app
-        maintaining its own copy of Angel One's instrument master."""
+        maintaining its own copy of Angel One's instrument master.
+
+        Returns EVERY matching series for a ticker, not just the primary
+        equity -- searchScrip("NSE", "SBIN") returns 14 results (SBIN-AF,
+        SBIN-BE, SBIN-BL, SBIN-EQ, SBIN-IQ, SBIN-RL, SBIN-U3, SBIN-U4, plus
+        SBINEQWETF-*/SBINMID150-* ETF variants sharing the ticker prefix),
+        confirmed directly against a real account. Only SBIN-EQ is the
+        actual equity. NEVER take matches[0] from this -- it is not
+        guaranteed to be the equity entry (confirmed: for SBIN it would
+        resolve to SBIN-AF). Use resolve_equity_symbol below, which is the
+        one place this filtering happens; do not re-implement it at a
+        call site.
+        """
         response = self._call(lambda: self._client.searchScrip(exchange, query))
         if not response or not response.get("status"):
             return []
         return response.get("data") or []
+
+    def resolve_equity_symbol(self, exchange: str, symbol: str) -> dict:
+        """The ONLY safe way to turn a human ticker into the symboltoken an
+        order should actually route to -- see search_symbol_token's own
+        docstring for why matches[0] is a real-money-safety bug (confirmed
+        live: it can resolve to an ETF or a different series sharing the
+        ticker prefix, not the stock the user meant to trade).
+
+        A bare "-EQ" suffix check is NOT sufficient by itself, and was the
+        first (wrong) version of this fix: searchScrip does a SUBSTRING
+        search, so searching "SBIN" also returns SBINEQWETF-EQ and
+        SBINMID150-EQ (confirmed live) -- two OTHER tickers that happen to
+        also end in "-EQ", which would make a suffix-only filter ambiguous
+        for exactly the query this is meant to make safe. The filter here
+        requires the tradingsymbol be EXACTLY "{symbol}-EQ" (case-
+        insensitive), not merely end with "-EQ" -- and the entry's own
+        `exchange` field must be NSE (not just the search's own exchange
+        param -- searchScrip can return cross-segment matches regardless
+        of what exchange was searched). Raises AngelOneError, never falls
+        back to an unfiltered guess, when no such entry exists -- a clear
+        rejection is the only acceptable failure mode here, not a silent
+        wrong-instrument route.
+        """
+        matches = self.search_symbol_token(exchange, symbol)
+        expected = f"{symbol.upper()}-EQ"
+        equity_matches = [
+            m for m in matches
+            if m.get("exchange") == "NSE" and str(m.get("tradingsymbol", "")).upper() == expected
+        ]
+        if not equity_matches:
+            raise AngelOneError(
+                f"could not resolve {symbol!r} to a standard NSE equity instrument "
+                f"(found {len(matches)} matching series, none an exact {expected!r} match)"
+            )
+        if len(equity_matches) > 1:
+            # Never silently pick one when the filter itself is ambiguous
+            # -- better to fail loudly than to guess with real money.
+            raise AngelOneError(
+                f"symbol {symbol!r} matched more than one NSE equity entry "
+                f"({[m.get('tradingsymbol') for m in equity_matches]}) -- refusing to guess"
+            )
+        return equity_matches[0]
 
     def place_order(
         self, *, symbol: str, symboltoken: str, exchange: str, side: str, qty: int,
@@ -300,6 +354,32 @@ class AngelOneLiveFeed:
     (e.g. via loop.call_soon_threadsafe), the same cross-thread handoff
     discipline app/broker/notify.py's fire-and-forget notifier uses for
     the opposite direction.
+
+    start() does NOT call SmartWebSocketV2.connect() -- it reimplements
+    connect()'s own body (header construction, WebSocketApp wiring,
+    run_forever) directly, replacing only on_error/on_close. This is a
+    real, confirmed bug in the installed smartapi-python 1.5.5 itself, not
+    a version pin this app can fix by choosing a different websocket-
+    client release: _on_close(self, wsapp) is declared to accept only
+    (wsapp), but the installed websocket-client (1.9.0) calls its on_close
+    callback with (wsapp, close_status_code, close_msg) -- a real arity
+    mismatch confirmed via inspect.signature against the installed
+    package, not assumed. Separately, _on_error's own internal retry path
+    calls self.on_error("...", "...") (2 args) against the base on_error
+    stub's own declared (self) -- zero extra args -- signature; also
+    confirmed via inspect.signature. Both raise TypeError from inside
+    websocket-client's own callback dispatch, and confirmed LIVE (real
+    account, project-5f) to combine with the SDK's own auto-reconnect into
+    a storm that hit Angel One's real connection-limit rate limiter
+    repeatedly across multiple symbols in a few seconds -- a real-account
+    risk, not merely a log spam annoyance. The two safe callbacks below
+    accept *args unconditionally (tolerant of whatever arity
+    websocket-client actually calls with, now or after either package's
+    next release) and do NOT auto-reconnect -- a broken retry loop that
+    hammers a broker's rate limiter is worse than no retry at all;
+    reconnect policy belongs at a higher level (routers/live_market.py's
+    WS endpoint, on an actual client reconnect) with real backoff, not
+    inside this wrapper.
     """
 
     def __init__(self, *, auth_token: str, api_key: str, client_code: str, feed_token: str):
@@ -309,10 +389,41 @@ class AngelOneLiveFeed:
         self._thread: threading.Thread | None = None
 
     def start(self, *, on_tick: Callable[[dict], None], on_open: Callable[[], None] | None = None) -> None:
-        self._ws.on_data = lambda _wsapp, data: on_tick(data)
-        if on_open is not None:
-            self._ws.on_open = lambda _wsapp: on_open()
-        self._thread = threading.Thread(target=self._ws.connect, daemon=True)
+        import logging
+        import ssl
+
+        import websocket as websocket_client  # lazy -- see module docstring
+
+        log = logging.getLogger(__name__)
+        ws = self._ws
+        ws.on_data = lambda _wsapp, data: on_tick(data)
+        ws.on_open = (lambda _wsapp: on_open()) if on_open is not None else (lambda _wsapp: None)
+
+        def _safe_on_error(_wsapp, *args) -> None:
+            log.warning("Angel One WebSocket error: %s", args)
+
+        def _safe_on_close(_wsapp, *args) -> None:
+            log.info("Angel One WebSocket closed: %s", args)
+
+        def _connect() -> None:
+            # Mirrors SmartWebSocketV2.connect()'s own header construction
+            # exactly (read directly from its installed source) -- only
+            # on_error/on_close differ, and only in signature safety, not
+            # in what they log.
+            headers = {
+                "Authorization": ws.auth_token,
+                "x-api-key": ws.api_key,
+                "x-client-code": ws.client_code,
+                "x-feed-token": ws.feed_token,
+            }
+            ws.wsapp = websocket_client.WebSocketApp(
+                ws.ROOT_URI, header=headers, on_open=ws._on_open,
+                on_error=_safe_on_error, on_close=_safe_on_close, on_data=ws._on_data,
+                on_ping=ws._on_ping, on_pong=ws._on_pong,
+            )
+            ws.wsapp.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE}, ping_interval=ws.HEART_BEAT_INTERVAL)
+
+        self._thread = threading.Thread(target=_connect, daemon=True)
         self._thread.start()
 
     def subscribe(self, tokens: list[str], correlation_id: str = "algoterminal") -> None:

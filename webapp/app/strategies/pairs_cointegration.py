@@ -34,8 +34,6 @@ from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
-import pandas as pd
-from statsmodels.tsa.stattools import coint
 
 from app.strategies.base import Signal
 from app.strategies.kalman import KalmanBetaAlpha
@@ -110,6 +108,17 @@ def compute_pair_stats(
     factored out, to avoid coupling the live trading path's performance to
     a display feature's needs.
     """
+    # Lazy, not module top-level -- statsmodels/pandas are real import
+    # weight (Render memory investigation) a process shouldn't pay for
+    # just from importing this module; this function's own docstring
+    # above already establishes it's off the hot tick-loop path, so
+    # deferring the import to here (rather than evaluate_pair, which IS
+    # hot but only needs `coint`, imported separately below) costs
+    # nothing extra once actually called, and nothing at all if never
+    # called.
+    import pandas as pd
+    from statsmodels.tsa.stattools import coint
+
     a, b = prices_a, prices_b
     if len(a) < min_history or len(a) != len(b):
         return None
@@ -184,6 +193,13 @@ class PairsCointegrationStrategy:
         self.qty = qty
 
     def evaluate_pair(self, pair: PairSnapshot) -> PairSignal | None:
+        # Lazy import -- see compute_pair_stats' own comment. This runs
+        # every tick once the strategy is enabled, but the import itself
+        # is only real work on the FIRST call (statsmodels is cached in
+        # sys.modules after that), so this doesn't reintroduce the cost
+        # to the hot path, only defers it off of process startup.
+        from statsmodels.tsa.stattools import coint
+
         a, b = pair.prices_a, pair.prices_b
         if len(a) < self.min_history or len(a) != len(b):
             return None

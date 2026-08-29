@@ -16,8 +16,6 @@ import warnings
 from dataclasses import dataclass
 
 import numpy as np
-from statsmodels.tsa.stattools import adfuller
-from statsmodels.tsa.vector_ar.vecm import coint_johansen
 
 ADF_SIGNIFICANCE = 0.05
 # statsmodels' cvt/cvm layout is columns [90%, 95%, 99%]; this is which
@@ -45,6 +43,12 @@ def adf_test(series: np.ndarray, maxlag: int | None = None) -> ADFResult:
     guaranteed to be, only that a random walk is an unlikely explanation
     for what was observed.
     """
+    # Lazy, not at module top level -- statsmodels is real import weight
+    # (Render memory investigation) a process that never actually runs a
+    # stationarity check (e.g. one still running migrations at startup)
+    # shouldn't pay for. Cheap on every call after the first: statsmodels
+    # is already in sys.modules by then.
+    from statsmodels.tsa.stattools import adfuller
     stat, pvalue, usedlag, _nobs, critical_values, _icbest = adfuller(
         np.asarray(series, dtype=float), maxlag=maxlag,
     )
@@ -93,6 +97,7 @@ def johansen_test(y: np.ndarray, x: np.ndarray) -> JohansenResult:
     needing more data to be reliable, which is why it's offered as a
     separate display-level check rather than gating live trading.
     """
+    from statsmodels.tsa.vector_ar.vecm import coint_johansen  # see adf_test's own comment on why this is lazy
     endog = np.column_stack([np.asarray(y, dtype=float), np.asarray(x, dtype=float)])
     with warnings.catch_warnings():
         # statsmodels casts an internally-complex eigenvalue-computation
