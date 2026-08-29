@@ -10,6 +10,7 @@ import { ErrorBoundary } from "../components/ErrorBoundary.js";
 import { SkeletonBlock } from "../components/Skeleton.js";
 import { pnlClass } from "../format.js";
 import { pnl as fmtSignedPnl } from "../format.js";
+import { useMode } from "../mode.js";
 
 const TAG_FILTER_KEY = "algoterminal:journal:tagFilter";
 
@@ -41,10 +42,15 @@ function NoteBody({ text }) {
 
 function TradePicker({ value, onChange }) {
   const [orders, setOrders] = React.useState(null);
+  const mode = useMode();
 
+  // Scoped to the CURRENT trading mode -- a note written while looking at
+  // a live trade should link to that live order, not have paper's orders
+  // mixed into the same dropdown (see AccountPanel.js's own 2026-08-30
+  // fix for the same underlying api.orders.list() mode-blindness).
   React.useEffect(() => {
-    api.orders.list().then(setOrders).catch(() => setOrders([]));
-  }, []);
+    api.orders.list(mode).then(setOrders).catch(() => setOrders([]));
+  }, [mode]);
 
   return html`
     <select class="input" value=${value ?? ""} onChange=${(e) => onChange(e.target.value ? Number(e.target.value) : null)}>

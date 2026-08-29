@@ -9,6 +9,8 @@ exercises the router with the adapter itself replaced by a stub.
 from __future__ import annotations
 
 import sys
+import threading
+import time
 import types
 
 import pytest
@@ -204,6 +206,43 @@ def test_search_symbol_token_returns_the_broker_matches(fake_client):
     adapter = AngelOneAdapter(_creds())
     matches = adapter.search_symbol_token("NSE", "RELIANCE")
     assert matches[0]["symboltoken"] == "2885"
+
+
+def test_concurrent_calls_through_one_shared_adapter_never_overlap(fake_client):
+    """Regression test for a real bug found live: get_adapter_for_user
+    caches ONE AngelOneAdapter per user, and Ticker.js's normal polling
+    fires GET /live/market/history for all 7 named symbols in parallel --
+    7 FastAPI sync-route threads calling into the SAME adapter instance
+    at once. Sequential calls were clean; concurrent calls failed
+    nondeterministically (a different subset of symbols each run). This
+    test proves _call now serializes every real call through one adapter,
+    regardless of how many threads try to use it at once."""
+    adapter = AngelOneAdapter(_creds())
+    adapter.login()
+
+    in_flight = 0
+    max_concurrent = 0
+    state_lock = threading.Lock()
+
+    def _slow_search_scrip(exchange, query):
+        nonlocal in_flight, max_concurrent
+        with state_lock:
+            in_flight += 1
+            max_concurrent = max(max_concurrent, in_flight)
+        time.sleep(0.02)  # long enough that overlapping calls would reliably be caught
+        with state_lock:
+            in_flight -= 1
+        return {"status": True, "data": [{"exchange": "NSE", "tradingsymbol": "RELIANCE-EQ", "symboltoken": "2885"}]}
+
+    adapter._client.searchScrip = _slow_search_scrip
+
+    threads = [threading.Thread(target=lambda: adapter.search_symbol_token("NSE", "RELIANCE")) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert max_concurrent == 1, "concurrent calls through the same adapter must never actually overlap"
 
 
 def test_resolve_equity_symbol_never_takes_an_unfiltered_first_match(fake_client):
