@@ -61,6 +61,32 @@ def test_cancelling_a_nonexistent_bracket_is_a_404(client):
     assert resp.status_code == 404
 
 
+def test_listing_brackets_by_mode_does_not_mix_paper_and_virtual(client):
+    """Regression test for a real bug: GET /orders/brackets had no mode
+    filter at all (unlike GET /orders, which at least has an optional
+    one) -- every caller got paper AND virtual AND live brackets mixed
+    together in one list, which is what a frontend account panel calling
+    it without mode awareness read as "live mode shows demo trades"."""
+    client.post("/orders", json={
+        "symbol": "ICICIBANK", "side": "buy", "order_type": "market", "qty": 5, "stop_loss_px": 1000.0,
+    })
+    client.post("/orders", json={
+        "symbol": "TCS", "side": "buy", "order_type": "market", "qty": 3, "mode": "virtual",
+        "stop_loss_px": 3000.0,
+    })
+
+    unfiltered = client.get("/orders/brackets").json()
+    assert len(unfiltered) == 2  # unchanged default behavior -- still additive, not required
+
+    paper_only = client.get("/orders/brackets", params={"mode": "paper"}).json()
+    assert len(paper_only) == 1
+    assert paper_only[0]["symbol"] == "ICICIBANK"
+
+    virtual_only = client.get("/orders/brackets", params={"mode": "virtual"}).json()
+    assert len(virtual_only) == 1
+    assert virtual_only[0]["symbol"] == "TCS"
+
+
 def test_a_second_manual_close_via_the_api_cancels_the_bracket(client):
     """The real end-to-end path: submit with SL/TP, then manually sell the
     position through the same /orders endpoint -- the bracket must be

@@ -394,14 +394,15 @@ class BracketOut(BaseModel):
 
 
 @router.get("/brackets", response_model=list[BracketOut])
-def list_brackets(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def list_brackets(
+    mode: Literal["paper", "virtual", "live"] | None = None,
+    user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
     from app.models.trading import BracketStatus
-    return (
-        db.query(Bracket)
-        .filter(Bracket.user_id == user.id, Bracket.status == BracketStatus.active)
-        .order_by(Bracket.created_at.desc())
-        .all()
-    )
+    q = db.query(Bracket).filter(Bracket.user_id == user.id, Bracket.status == BracketStatus.active)
+    if mode is not None:
+        q = q.filter(Bracket.mode == Mode(mode))
+    return q.order_by(Bracket.created_at.desc()).all()
 
 
 @router.delete("/brackets/{bracket_id}")

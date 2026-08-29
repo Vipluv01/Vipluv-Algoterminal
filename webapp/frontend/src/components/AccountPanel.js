@@ -3,8 +3,26 @@ import { html } from "../html.js";
 import { api } from "../api.js";
 import { fmtMoney, fmtNum, pnlClass } from "../format.js";
 import { LineChart } from "./LineChart.js";
+import { useMode } from "../mode.js";
 
 const TABS = ["Portfolio", "Open Orders", "Brackets", "All Orders"];
+
+// paper -> GET /account + /account/equity-curve, virtual -> the /virtual
+// equivalents -- same response shapes either way (AccountOut's cash/
+// total_value/total_unrealized_pnl/positions, EquityPointOut's `equity`),
+// mirroring Accounts.js's own useAccountForMode. Live has no account-
+// snapshot endpoint yet -- resolves to [null, []] so the Portfolio tab
+// below can render the same honest "not available yet" note Accounts.js
+// already uses, rather than a confusing wall of dashes with no
+// explanation. This component was the actual bug found on 2026-08-30 (the
+// user's "live mode shows demo trades" report): it called api.account()/
+// api.equityCurve() unconditionally regardless of mode, so switching to
+// Live silently kept showing paper's numbers on the main trading screen.
+function accountAndCurveForMode(mode) {
+  if (mode === "virtual") return Promise.all([api.virtual.account(), api.virtual.equityCurve()]);
+  if (mode === "live") return Promise.resolve([null, []]);
+  return Promise.all([api.account(), api.equityCurve()]);
+}
 
 export function AccountPanel({ refreshKey }) {
   const [tab, setTab] = React.useState("Portfolio");
@@ -13,18 +31,28 @@ export function AccountPanel({ refreshKey }) {
   const [brackets, setBrackets] = React.useState([]);
   const [equityCurve, setEquityCurve] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
+  const mode = useMode();
 
+  // Orders/brackets DO have real per-mode data even in live mode (unlike
+  // the account snapshot above) -- GET /orders and /orders/brackets both
+  // support mode=paper|virtual|live already, so Open Orders/Brackets/All
+  // Orders stay real and correctly filtered under every mode; only the
+  // Portfolio tab needs the "not available yet" carve-out.
   const load = React.useCallback(async () => {
     try {
-      const [acc, ords, brs, curve] = await Promise.all([api.account(), api.orders.list(), api.orders.brackets.list(), api.equityCurve()]);
+      const [[acc, curve], ords, brs] = await Promise.all([
+        accountAndCurveForMode(mode),
+        api.orders.list(mode),
+        api.orders.brackets.list(mode),
+      ]);
       setAccount(acc);
+      setEquityCurve(curve);
       setOrders(ords);
       setBrackets(brs);
-      setEquityCurve(curve);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [mode]);
 
   React.useEffect(() => { load(); }, [load, refreshKey]);
   React.useEffect(() => {
@@ -52,7 +80,13 @@ export function AccountPanel({ refreshKey }) {
 
       ${loading && html`<div class="skeleton" style=${{ height: "80px" }} />`}
 
-      ${!loading && tab === "Portfolio" && html`
+      ${!loading && tab === "Portfolio" && mode === "live" && html`
+        <div style=${{ color: "var(--text-faint)", fontSize: "12px", padding: "12px 0" }}>
+          Live account snapshots aren't available yet — check back once this phase's broker integration is complete.
+        </div>
+      `}
+
+      ${!loading && tab === "Portfolio" && mode !== "live" && html`
         <${React.Fragment}>
           <div style=${{ display: "flex", flexWrap: "wrap", gap: "16px 24px", marginBottom: "14px" }}>
             <div>

@@ -68,10 +68,15 @@ export const api = {
   symbols: () => request("GET", "/symbols"),
 
   orders: {
-    list: () => request("GET", "/orders"),
-    // Filtered + paginated variant for the Logs screen -- `list()` above
-    // stays untouched (bare array, no params) since AccountPanel.js and
-    // Journal.js's trade picker both call it that way already.
+    // mode is optional (omit for "every mode this user has", which is
+    // never actually correct once virtual/live are real -- see the
+    // 2026-08-30 AccountPanel.js incident: it called this with no mode at
+    // all and silently kept showing paper's orders under every mode).
+    // Bare-array return shape, unlike listPage below -- every caller here
+    // (AccountPanel.js, Journal.js's trade picker) wants the plain list,
+    // not X-Total-Count-based pagination.
+    list: (mode) => request("GET", `/orders${mode ? `?mode=${mode}` : ""}`),
+    // Filtered + paginated variant for the Logs screen.
     listPage: ({ mode, status, symbol, strategy, dateFrom, dateTo, limit, offset } = {}) => {
       const params = new URLSearchParams();
       if (mode) params.set("mode", mode);
@@ -88,7 +93,7 @@ export const api = {
     submit: (body) => request("POST", "/orders", body),
     cancel: (id) => request("DELETE", `/orders/${id}`),
     brackets: {
-      list: () => request("GET", "/orders/brackets"),
+      list: (mode) => request("GET", `/orders/brackets${mode ? `?mode=${mode}` : ""}`),
       cancel: (id) => request("DELETE", `/orders/brackets/${id}`),
     },
   },

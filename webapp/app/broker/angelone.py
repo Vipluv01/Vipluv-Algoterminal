@@ -93,9 +93,17 @@ class AngelOneAdapter:
     """One broker session for one user. Not thread-safe for concurrent
     calls on the SAME instance (matches this codebase's existing "one
     engine per goroutine" discipline elsewhere) -- app/broker/adapter_cache.py
-    hands out one instance per user, and FastAPI's per-request handling
-    already serializes a single user's own requests in practice (one
-    browser tab, one order at a time)."""
+    hands out one instance per user, and _call below serializes every
+    real call through it with a lock -- an EARLIER version of this
+    docstring claimed "FastAPI's per-request handling already serializes
+    a single user's own requests in practice," which is wrong and was
+    disproven live: Ticker.js's normal polling fires all 7 named symbols'
+    GET /live/market/history requests in parallel (7 simultaneous
+    sync-route threads, all sharing this one cached adapter), and that
+    produced nondeterministic per-request failures under concurrency that
+    never reproduced when the same 7 calls were made sequentially. The
+    lock below is the actual fix, not the (false) assumption it replaces.
+    """
 
     def __init__(self, creds: AngelOneCredentials):
         self._creds = creds
@@ -104,6 +112,13 @@ class AngelOneAdapter:
         self._refresh_token: str | None = None
         self._feed_token: str | None = None
         self._logged_in_at: float | None = None
+        # Guards every real call through this adapter -- see _call's own
+        # docstring on the concurrency bug this closes. Not reentrant on
+        # purpose: nothing inside _call/login/_refresh ever calls back
+        # into _call on the same thread, so a plain Lock (not RLock) is
+        # correct and catches an accidental future reentrant call as a
+        # deadlock during testing, rather than silently allowing it.
+        self._call_lock = threading.Lock()
 
     # -- session -------------------------------------------------------
 
@@ -162,24 +177,50 @@ class AngelOneAdapter:
         the same refresh -> re-login -> raise AngelOneAuthError path,
         regardless of whether it happened on the first call ever made or
         the hundredth.
+
+        Holds self._call_lock for the ENTIRE method, not just around the
+        refresh/re-login fallback -- a real concurrency bug found live:
+        get_adapter_for_user caches one AngelOneAdapter per user, and
+        FastAPI's sync routes each run on their OWN thread, so 7
+        concurrent GET /live/market/history requests (Ticker.js's normal
+        polling, one per named symbol) really do call into this SAME
+        adapter instance from 7 threads at once. Without a lock, a
+        transient failure on ANY one of those threads (a real Angel One
+        rate/concurrency constraint, or nothing more than ordinary
+        network flakiness) would trigger THAT thread's own refresh/
+        re-login, mutating self._client's shared access_token/refresh_
+        token/feed_token while the other 6 threads were mid-request
+        against the SAME shared session state -- and if more than one
+        thread hit this at once, they would race to refresh or even
+        fully re-login concurrently, each invalidating the session the
+        others were about to use. That race is sufficient on its own to
+        produce the exact symptom seen live (sequential calls clean,
+        concurrent calls nondeterministically failing, a different
+        subset each run) independent of whether Angel One's own API
+        additionally enforces a one-in-flight-request-per-session limit
+        server-side. Serializing every call through this lock closes the
+        race unconditionally, and also naturally satisfies a server-side
+        single-in-flight constraint if one exists, since only one HTTP
+        call through this adapter is ever actually in flight at a time.
         """
-        try:
-            if self._client is None:
-                self.login()
-            return fn()
-        except Exception as first_exc:
+        with self._call_lock:
             try:
-                self._refresh()
+                if self._client is None:
+                    self.login()
                 return fn()
-            except Exception:
-                pass
-            try:
-                self.login()
-                return fn()
-            except Exception as final_exc:
-                raise AngelOneAuthError(
-                    f"Angel One call failed after refresh+re-login attempts: {final_exc}"
-                ) from first_exc
+            except Exception as first_exc:
+                try:
+                    self._refresh()
+                    return fn()
+                except Exception:
+                    pass
+                try:
+                    self.login()
+                    return fn()
+                except Exception as final_exc:
+                    raise AngelOneAuthError(
+                        f"Angel One call failed after refresh+re-login attempts: {final_exc}"
+                    ) from first_exc
 
     def ensure_session(self) -> None:
         """Logs in if this adapter has never logged in yet -- a no-op
@@ -187,9 +228,13 @@ class AngelOneAdapter:
         that needs a live jwt/feed token BEFORE its first `_call`-wrapped
         request (AngelOneLiveFeed's constructor needs them directly, not
         through `_call`), rather than reaching into `_call`/`login`
-        itself."""
-        if self._client is None:
-            self.login()
+        itself. Takes the SAME self._call_lock _call does -- a login
+        triggered from here must be mutually exclusive with one
+        triggered from a concurrent _call on another thread, or this
+        would just reopen the same race _call's own lock closes."""
+        with self._call_lock:
+            if self._client is None:
+                self.login()
 
     # -- trading ---------------------------------------------------------
 
