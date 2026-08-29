@@ -18,9 +18,15 @@ book), and Angel One's candle API only offers whole-minute-and-up
 intervals (no 1s/5s bars the way the simulated engine's per-second
 price_history allows).
 
-UNTESTED against a real Angel One feed (no live account exists to test
-against) -- see app/broker/angelone.py's own docstring on which parts of
-the underlying contract are confirmed from source vs. community-sourced.
+The WS endpoint acquires its feed through app/broker/feed_registry.py,
+not a per-connection AngelOneLiveFeed -- see that module's own docstring
+on why: a real incident (Aug 28-29), where a per-connection feed
+combined with an uncapped client-side retry loop produced 1,539
+reconnect attempts against the real account over ~4 hours, hitting Angel
+One's own connection-rate limiter repeatedly. feed_registry shares one
+real upstream connection across every subscriber to the same symbol and
+enforces a real cooldown on how often a new one can be created, as a
+server-side backstop independent of whether the client behaves.
 """
 
 from __future__ import annotations
@@ -37,7 +43,8 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.broker.adapter_cache import IncompleteBrokerCredentialError, NoBrokerCredentialError, get_adapter_for_user
-from app.broker.angelone import AngelOneError, AngelOneLiveFeed
+from app.broker.angelone import AngelOneError
+from app.broker.feed_registry import FeedCreationThrottled, acquire_feed, release_feed
 from app.db import get_db
 from app.models.user import User
 
@@ -85,13 +92,18 @@ def _resolve_symboltoken(adapter, symbol: str) -> str:
     # other exception type -- only HTTPException gets turned into a
     # clean response automatically. Caught directly against a live dev
     # server (bourse1, testing with a deliberately invalid TOTP secret).
+    #
+    # resolve_equity_symbol, not search_symbol_token + matches[0] -- the
+    # same real-money-safety bug found live in orders.py's confirm
+    # endpoint applies here too: a chart/history request for "SBIN" must
+    # resolve to the actual equity (SBIN-EQ), not silently show an ETF or
+    # a different series sharing the ticker prefix. See
+    # AngelOneAdapter.resolve_equity_symbol's own docstring.
     try:
-        matches = adapter.search_symbol_token("NSE", symbol)
+        match = adapter.resolve_equity_symbol("NSE", symbol)
     except AngelOneError as e:
         raise HTTPException(status_code=502, detail=f"Angel One symbol lookup failed: {e}")
-    if not matches:
-        raise HTTPException(status_code=404, detail=f"unknown symbol {symbol!r} on NSE")
-    return matches[0]["symboltoken"]
+    return match["symboltoken"]
 
 
 @router.get("/market/history", response_model=HistoryOut)
@@ -147,6 +159,15 @@ def _live_tick_to_payload(symbol: str, tick: dict) -> dict:
 async def live_market_ws(
     websocket: WebSocket, symbol: str, user: User = Depends(get_current_user), db: Session = Depends(get_db),
 ):
+    """Subscribes to the SHARED feed_registry feed for (user.id, symbol),
+    not a per-connection AngelOneLiveFeed -- see feed_registry.py's own
+    docstring on the real incident (a 4-hour storm against the real
+    account's rate limiter) this fixes. Every branch that can return
+    before subscribing must not have registered anything with
+    feed_registry yet; every branch that DOES subscribe must release in
+    `finally`, unconditionally -- an unreleased subscriber_id is a shared
+    feed that never gets torn down.
+    """
     await websocket.accept()
 
     try:
@@ -156,31 +177,39 @@ async def live_market_ws(
         return
 
     try:
-        symboltoken = adapter.search_symbol_token("NSE", symbol)
-        if not symboltoken:
-            await websocket.close(code=4404, reason=f"unknown symbol {symbol!r}")
-            return
-        token = symboltoken[0]["symboltoken"]
+        # resolve_equity_symbol, not search_symbol_token + matches[0] --
+        # see AngelOneAdapter.resolve_equity_symbol's own docstring on the
+        # real-money/correctness bug this replaces (matches[0] is not
+        # guaranteed to be the actual equity series).
+        match = adapter.resolve_equity_symbol("NSE", symbol)
+        token = match["symboltoken"]
         adapter.ensure_session()  # AngelOneLiveFeed needs a live jwt/feed token directly, before its first use
     except AngelOneError as e:
-        await websocket.close(code=4500, reason=str(e))
+        await websocket.close(code=4404, reason=str(e))
         return
 
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
 
     def on_tick(data: dict) -> None:
-        # Called from AngelOneLiveFeed's own background thread (see its
-        # own docstring) -- call_soon_threadsafe is the one safe way to
-        # hand data back to this coroutine's event loop from there.
+        # Called from feed_registry's fan-out, itself called from
+        # AngelOneLiveFeed's own background thread (see its own
+        # docstring) -- call_soon_threadsafe is the one safe way to hand
+        # data back to THIS connection's event loop from there.
         loop.call_soon_threadsafe(queue.put_nowait, data)
 
-    feed = AngelOneLiveFeed(
-        auth_token=adapter._jwt_token, api_key=adapter._creds.api_key,
-        client_code=adapter._creds.client_code, feed_token=adapter._feed_token,
-    )
-    feed.start(on_tick=on_tick)
-    feed.subscribe([token])
+    try:
+        acquire_feed(
+            user_id=user.id, symbol=symbol, adapter=adapter, symboltoken=token,
+            subscriber_id=websocket, on_tick=on_tick,
+        )
+    except FeedCreationThrottled as e:
+        # A real, deliberate rejection -- NOT something this endpoint
+        # retries on the caller's behalf (that would just reintroduce the
+        # retry-storm risk this whole registry exists to close off). The
+        # client sees a clean close code and decides its own backoff.
+        await websocket.close(code=4429, reason=str(e))
+        return
 
     try:
         # Two concurrent waits, same reason market_ws.py's own receive
@@ -203,4 +232,4 @@ async def live_market_ws(
     except WebSocketDisconnect:
         pass
     finally:
-        feed.stop()
+        release_feed(user_id=user.id, symbol=symbol, subscriber_id=websocket)

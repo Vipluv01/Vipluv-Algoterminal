@@ -84,7 +84,16 @@ function useConnectionStatus(mode) {
   const freshness = useStaleness(lastTickAt, DEFAULT_STALE_THRESHOLD_MS);
 
   let status;
-  if (wsStatus === "live" && freshness === "fresh") status = "live";
+  // Checked FIRST, ahead of the staleness-based branches below --
+  // "disconnected" (api.js's live-feed circuit breaker gave up) is a
+  // genuine terminal ERROR state, not staleness. Staleness means "still
+  // trying, just slow to deliver"; this connection has explicitly stopped
+  // trying and won't resume without navigating away and back. A tick
+  // received minutes ago from BEFORE the breaker tripped must not make
+  // this read as merely "offline" (implying reconnect-in-progress) once
+  // the breaker has actually given up.
+  if (wsStatus === "disconnected") status = "disconnected";
+  else if (wsStatus === "live" && freshness === "fresh") status = "live";
   else if (lastTickAt === null) status = wsStatus; // never yet connected -- "connecting", no baseline to judge staleness against
   else if (freshness === "stale") status = "offline"; // down (or silently not delivering) for 3s+
   else status = "reconnecting";
@@ -92,7 +101,7 @@ function useConnectionStatus(mode) {
   return { status, lastTickAt, wsDeltaMs };
 }
 
-const STATUS_LABEL = { connecting: "CONNECTING", live: "LIVE", reconnecting: "RECONNECTING", offline: "OFFLINE" };
+const STATUS_LABEL = { connecting: "CONNECTING", live: "LIVE", reconnecting: "RECONNECTING", offline: "OFFLINE", disconnected: "DISCONNECTED — not retrying" };
 
 // Deliberately lean: only stats that are actually true right now (paper
 // mode, a real clock, a REAL WebSocket connection state, real order-submit

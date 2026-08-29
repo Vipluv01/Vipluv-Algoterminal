@@ -26,7 +26,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from statsmodels.tsa.stattools import coint
 
 from app.position_sizing import size_position
 from app.strategies.base import Signal
@@ -144,6 +143,11 @@ class PairsKellyStrategy:
                               # same fixed size pairs_cointegration.py always uses
 
     def evaluate_pair(self, pair: PairSnapshot) -> PairSignal | None:
+        # Lazy import -- see pairs_cointegration.py's own comment on this
+        # exact pattern (statsmodels import weight deferred off process
+        # startup, cheap on every call after the first).
+        from statsmodels.tsa.stattools import coint
+
         a, b = pair.prices_a, pair.prices_b
         if len(a) < self.min_history or len(a) != len(b):
             return None

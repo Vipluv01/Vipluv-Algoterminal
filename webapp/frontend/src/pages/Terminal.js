@@ -10,7 +10,7 @@ import { TimeAndSales } from "../components/TimeAndSales.js";
 import { DEFAULT_STALE_THRESHOLD_MS, useStaleness } from "../clock.js";
 import { useMode } from "../mode.js";
 
-const STATUS_LABEL = { connecting: "Connecting…", live: "Live", reconnecting: "Reconnecting…", offline: "Offline" };
+const STATUS_LABEL = { connecting: "Connecting…", live: "Live", reconnecting: "Reconnecting…", offline: "Offline", disconnected: "Disconnected — not retrying" };
 
 function SymbolTabs({ symbols, active, onSelect, ticks }) {
   return html`
@@ -75,7 +75,11 @@ export function Terminal() {
   // apart.
   const freshness = useStaleness(lastTickAt, DEFAULT_STALE_THRESHOLD_MS);
   let status;
-  if (wsStatus === "live" && freshness === "fresh") status = "live";
+  // "disconnected" (api.js's live-feed circuit breaker gave up) checked
+  // first, ahead of staleness -- see StatusBar.js's identical guard for
+  // why: it's a genuine stopped state, not "still trying, just stale".
+  if (wsStatus === "disconnected") status = "disconnected";
+  else if (wsStatus === "live" && freshness === "fresh") status = "live";
   else if (lastTickAt === null) status = wsStatus;
   else if (freshness === "stale") status = "offline";
   else status = "reconnecting";

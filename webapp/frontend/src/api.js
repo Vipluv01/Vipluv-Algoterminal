@@ -235,15 +235,62 @@ export const api = {
 // two named wrappers (or subscribeMarketForMode) so the path a given
 // caller ends up on is always explicit at the call site, not implied by
 // which arguments happened to be passed to a generic function.
-function _subscribeWs(wsPath, onTick, onStatusChange) {
+//
+// maxConsecutiveFailures (undefined = retry forever, subscribeMarket's
+// own behavior) exists ONLY because subscribeLiveMarket sets one -- an
+// indefinite 800ms->8s reconnect loop against our OWN simulated backend
+// is harmless (it's local, free, and every other part of this app already
+// relies on it reconnecting no matter how long a dev restart takes), but
+// the exact same loop against a REAL Angel One WebSocket is not: it's
+// what turned a dropped connection into 1,539 reconnect attempts over 4+
+// hours against a real account on 2026-08-28 (see the incident this
+// constant exists to prevent a repeat of). "reconnecting" forever with no
+// ceiling is a UX nicety for a free simulated feed and a real-account
+// liability for a broker feed -- those are different enough risk profiles
+// that this cannot be one shared default.
+//
+// failureCounter (optional {get,increment,reset}) is what makes the
+// ceiling apply to the SYMBOL, not to whichever JS closure happens to be
+// watching it. Without this, two independent subscribers to the same
+// live symbol (StatusBar's heartbeat and whatever page is open both
+// defaulting to the same instrument, say) would each get their OWN fresh
+// 5 attempts -- caught in testing: a mocked-failure run against a single
+// symbol produced 10 real connection attempts, not 5, because both
+// subscribers ran their own private counter to the same ceiling. Passing
+// a counter keyed by symbol (subscribeLiveMarket does this below) makes
+// the second subscriber see the first one's failures already counted,
+// so the aggregate against one real account+symbol is bounded by the
+// ceiling itself, not multiplied by however many components happen to be
+// watching it. Omitted entirely for subscribeMarket's sim case, which
+// has no such shared-real-resource concern.
+function _subscribeWs(wsPath, onTick, onStatusChange, { maxConsecutiveFailures, failureCounter } = {}) {
   let ws = null;
   let closedByCaller = false;
   let retryDelay = 800;
   let everConnected = false;
+  let localFailures = 0;
+
+  const getFailures = () => (failureCounter ? failureCounter.get() : localFailures);
+  const bumpFailures = () => {
+    if (failureCounter) failureCounter.increment();
+    else localFailures += 1;
+    return getFailures();
+  };
+  const resetFailures = () => {
+    if (failureCounter) failureCounter.reset();
+    else localFailures = 0;
+  };
 
   const setStatus = (status) => onStatusChange && onStatusChange(status);
 
   function connect() {
+    // Already exhausted by ANOTHER subscriber to this same symbol --
+    // don't spend a real connection attempt just to immediately fail the
+    // same way; report the same terminal state this symbol is already in.
+    if (maxConsecutiveFailures && getFailures() >= maxConsecutiveFailures) {
+      setStatus("disconnected");
+      return;
+    }
     setStatus(everConnected ? "reconnecting" : "connecting");
     ws = new WebSocket(`${WS_BASE}${wsPath}`);
     ws.onmessage = (ev) => {
@@ -256,10 +303,27 @@ function _subscribeWs(wsPath, onTick, onStatusChange) {
     ws.onopen = () => {
       retryDelay = 800;
       everConnected = true;
+      // A real, demonstrated success -- if this symbol's feed is
+      // reachable again, any OTHER still-retrying (or already-tripped)
+      // subscriber to it deserves a fresh chance too, not just this one.
+      resetFailures();
       setStatus("live");
     };
     ws.onclose = () => {
       if (closedByCaller) return;
+      const failures = bumpFailures();
+      if (maxConsecutiveFailures && failures >= maxConsecutiveFailures) {
+        // A genuine terminal state, not "reconnecting" and not "stale" --
+        // this connection has stopped trying, on purpose, and will not
+        // resume on its own. Callers must treat this as algoterminal's
+        // ERROR state (five-states discipline: loading/empty/error/stale/
+        // ready), distinct from staleness (which still implies "still
+        // trying, just slow"). No further setTimeout is scheduled -- this
+        // is the one exit from the reconnect loop that isn't the caller
+        // unsubscribing.
+        setStatus("disconnected");
+        return;
+      }
       setStatus("reconnecting");
       setTimeout(connect, retryDelay);
       retryDelay = Math.min(retryDelay * 1.5, 8000);
@@ -278,6 +342,27 @@ export function subscribeMarket(symbol, onTick, onStatusChange) {
   return _subscribeWs(`/ws/market/${symbol}`, onTick, onStatusChange);
 }
 
+// Real Angel One WebSocket connections per account are a finite, shared
+// resource (rate limits, the account holder's own broker session) --
+// unlike the simulated feed, this cannot be allowed to retry forever.
+const LIVE_MAX_CONSECUTIVE_FAILURES = 5;
+
+// Keyed by symbol, module-level (not per-call) -- this is exactly what
+// makes the ceiling apply per SYMBOL rather than per subscriber; see
+// _subscribeWs's own comment on the 10-attempts-not-5 bug this fixes.
+// Never cleared except by a real reload (a fresh module evaluation) --
+// deliberately outlives any one component unmounting, since navigating
+// away and back within the same session must not hand a tripped symbol a
+// new allowance.
+const liveFailureCounts = new Map();
+function _liveFailureCounter(symbol) {
+  return {
+    get: () => liveFailureCounts.get(symbol) || 0,
+    increment: () => liveFailureCounts.set(symbol, (liveFailureCounts.get(symbol) || 0) + 1),
+    reset: () => liveFailureCounts.set(symbol, 0),
+  };
+}
+
 // Live-mode equivalent, backed by a real Angel One SmartWebSocketV2 feed
 // (see app/routers/live_market.py). Same tick payload shape (type/symbol/
 // price/best_bid/best_ask/bids/asks/sent_at) as subscribeMarket's own --
@@ -286,13 +371,21 @@ export function subscribeMarket(symbol, onTick, onStatusChange) {
 // fabricated" convention the simulated feed uses for a derived index's
 // own missing book). If the connecting user has no complete broker
 // credential, the server closes with code 4400 and a reason string
-// immediately -- that surfaces here as an ordinary reconnect-retry cycle
-// like any other drop, since there's no separate "permanently blocked"
-// status in this module's vocabulary (see subscribeMarket's own comment
-// on why "how long has it been down" is left to the caller's clock, not
-// this function).
+// immediately -- same reconnect-retry cycle as any other drop, up to the
+// same failure ceiling as everything else here (a missing/incomplete
+// credential is exactly the kind of failure that will NEVER clear on its
+// own via retrying, so it should burn through the ceiling fast and stop,
+// not spin for 4+ hours).
+//
+// The ceiling is enforced HERE, not left to the caller to opt into --
+// same reasoning as setMode's live-readiness proof in mode.js: a safety
+// property this important cannot depend on every future caller
+// remembering to ask for it.
 export function subscribeLiveMarket(symbol, onTick, onStatusChange) {
-  return _subscribeWs(`/live/ws/market/${symbol}`, onTick, onStatusChange);
+  return _subscribeWs(`/live/ws/market/${symbol}`, onTick, onStatusChange, {
+    maxConsecutiveFailures: LIVE_MAX_CONSECUTIVE_FAILURES,
+    failureCounter: _liveFailureCounter(symbol),
+  });
 }
 
 // One switch point for "which feed does this symbol's live price come

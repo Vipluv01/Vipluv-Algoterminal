@@ -1,17 +1,33 @@
 import React from "react";
 import { html } from "../html.js";
-import { api, subscribeMarketForMode } from "../api.js";
+import { api, subscribeMarket } from "../api.js";
 import { fmtMoney } from "../format.js";
 import { DEFAULT_STALE_THRESHOLD_MS, useNow } from "../clock.js";
 import { useMode } from "../mode.js";
 
-// A live scrolling ticker strip across every named instrument -- every
-// other page in algoterminal already proves the real-time data exists
-// (Terminal/Charts subscribe per-symbol already); this is the same
-// subscribeMarketForMode() primitive, just fanned out across all 7
-// symbols at once and rendered as a continuously-scrolling marquee
-// instead of a single price display, matching a real trading terminal's
-// index bar.
+// A live scrolling ticker strip across every named instrument. In paper/
+// virtual mode this fans subscribeMarket() out across all 7 symbols at
+// once -- free and unlimited against the simulated engine, the same
+// primitive Terminal.js/Charts.js already use per-symbol (never live, so
+// no need to route through subscribeMarketForMode here).
+//
+// In LIVE mode this deliberately does NOT do the same fan-out: N held-
+// open real Angel One WebSocket connections for a purely decorative
+// strip is exactly what produced a 4+ hour, 1,539-reconnect-attempt
+// incident against a real account on 2026-08-28 (see api.js's
+// subscribeLiveMarket docstring for the fix on the WS side; this is the
+// other half -- not needing a live WS here AT ALL for something that's
+// read at a glance, not traded off of). Live mode instead polls GET
+// /live/market/history (one short-lived REST request per symbol, not a
+// held-open session) on a slow, independent interval.
+const LIVE_TICKER_POLL_MS = 30_000;
+// Proportional to the poll interval, not DEFAULT_STALE_THRESHOLD_MS
+// (3s) -- that threshold assumes a live WS ticking every second; applied
+// unchanged to a 30s poll, every live-mode item would read "stale"
+// permanently, which is worse than useless as a signal. Two missed polls
+// of slack before flagging it.
+const LIVE_TICKER_STALE_THRESHOLD_MS = LIVE_TICKER_POLL_MS * 3;
+
 export function Ticker() {
   const [symbols, setSymbols] = React.useState([]);
   const [ticks, setTicks] = React.useState({});
@@ -31,40 +47,53 @@ export function Ticker() {
   React.useEffect(() => {
     if (!symbols.length) return;
     // /symbols also returns derived indices (NIFTY50, BANKNIFTY --
-    // is_derived: true), but /ws/market/{symbol} only streams the
-    // NAMED_INSTRUMENTS constituents each is computed FROM (there's no
-    // live per-tick feed for a derived index itself). Subscribing to one
-    // anyway isn't a graceful no-op: market_ws.py rejects an unknown
-    // symbol by calling websocket.close() before accept(), which Starlette
-    // turns into an HTTP 403 at the handshake -- a real, visible connection
-    // failure every single page load, not a quiet skip. Filtered out here;
-    // a derived index's price/pct just render as the dash sentinel below
-    // rather than a number this ticker was never actually fed.
-    //
-    // In live mode this opens N SIMULTANEOUS real Angel One WebSocket
-    // connections (one per named instrument) purely for a decorative
-    // strip -- fine for the simulated engine (unlimited fake connections
-    // cost nothing) but worth someone revisiting against Angel One's
-    // actual per-account WS connection limits before this ships live for
-    // real; flagged, not silently worked around here.
-    const unsubs = symbols
-      .filter((s) => !s.is_derived)
-      .map((s) =>
-        subscribeMarketForMode(mode, s.symbol, (tick) => {
-          setTicks((prev) => ({ ...prev, [s.symbol]: tick.price }));
-          setLastUpdatedAt((prev) => ({ ...prev, [s.symbol]: Date.now() }));
-        })
-      );
+    // is_derived: true). Neither data source below has a live per-tick
+    // feed for a derived index itself (it's computed FROM the named
+    // constituents, not streamed directly) -- subscribing/polling one
+    // anyway isn't a graceful no-op on the WS side (market_ws.py rejects
+    // it at the handshake, a real visible failure every page load), so
+    // it's filtered out here either way; a derived index's price/pct just
+    // render as the dash sentinel below rather than a number neither path
+    // was ever going to feed.
+    const namedSymbols = symbols.filter((s) => !s.is_derived);
+
+    if (mode === "live") {
+      let cancelled = false;
+      const poll = () => {
+        namedSymbols.forEach((s) => {
+          api.live.history(s.symbol, "1m", 1)
+            .then((hist) => {
+              if (cancelled) return;
+              const last = hist.bars[hist.bars.length - 1];
+              if (!last) return; // no bar yet for this symbol -- leave its price as whatever it last was
+              setTicks((prev) => ({ ...prev, [s.symbol]: last.close }));
+              setLastUpdatedAt((prev) => ({ ...prev, [s.symbol]: Date.now() }));
+            })
+            .catch(() => {}); // one symbol's poll failing (e.g. no credential) shouldn't blank out the others
+        });
+      };
+      poll();
+      const id = setInterval(poll, LIVE_TICKER_POLL_MS);
+      return () => { cancelled = true; clearInterval(id); };
+    }
+
+    const unsubs = namedSymbols.map((s) =>
+      subscribeMarket(s.symbol, (tick) => {
+        setTicks((prev) => ({ ...prev, [s.symbol]: tick.price }));
+        setLastUpdatedAt((prev) => ({ ...prev, [s.symbol]: Date.now() }));
+      })
+    );
     return () => unsubs.forEach((u) => u());
   }, [symbols, mode]);
 
   if (!symbols.length) return null;
 
+  const staleThreshold = mode === "live" ? LIVE_TICKER_STALE_THRESHOLD_MS : DEFAULT_STALE_THRESHOLD_MS;
   const items = symbols.map((s) => {
     const price = ticks[s.symbol];
     const pct = price != null ? ((price - s.reference_price) / s.reference_price) * 100 : null;
     const updatedAt = lastUpdatedAt[s.symbol];
-    const stale = updatedAt === undefined || now - updatedAt > DEFAULT_STALE_THRESHOLD_MS;
+    const stale = updatedAt === undefined || now - updatedAt > staleThreshold;
     return { symbol: s.symbol, price, pct, stale };
   });
 

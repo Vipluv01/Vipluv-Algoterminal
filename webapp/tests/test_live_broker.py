@@ -13,7 +13,7 @@ import types
 
 import pytest
 
-from app.broker.angelone import AngelOneAdapter, AngelOneAuthError, AngelOneCredentials, AngelOneError
+from app.broker.angelone import AngelOneAdapter, AngelOneAuthError, AngelOneCredentials, AngelOneError, AngelOneLiveFeed
 
 
 def _creds() -> AngelOneCredentials:
@@ -206,6 +206,41 @@ def test_search_symbol_token_returns_the_broker_matches(fake_client):
     assert matches[0]["symboltoken"] == "2885"
 
 
+def test_resolve_equity_symbol_never_takes_an_unfiltered_first_match(fake_client):
+    """The adapter-level version of the real-money-safety bug regression
+    tests above (test_confirming_a_live_order_never_routes_to_the_wrong_
+    instrument, test_live_market_api.py's read-path equivalent) -- this
+    one exercises AngelOneAdapter.resolve_equity_symbol itself directly,
+    against a fake SmartConnect returning the exact real captured SBIN
+    result set (14 series, matches[0]=SBIN-AF, plus SBINEQWETF-EQ/
+    SBINMID150-EQ substring-decoy tickers that ALSO end in -EQ)."""
+    sbin_matches = [
+        {"exchange": "NSE", "tradingsymbol": t, "symboltoken": str(200 + i)}
+        for i, t in enumerate([
+            "SBIN-AF", "SBIN-BE", "SBIN-BL", "SBIN-EQ", "SBIN-IQ", "SBIN-RL", "SBIN-U3", "SBIN-U4",
+            "SBINEQWETF-BL", "SBINEQWETF-EQ", "SBINEQWETF-RL",
+            "SBINMID150-BL", "SBINMID150-EQ", "SBINMID150-RL",
+        ])
+    ]
+    adapter = AngelOneAdapter(_creds())
+    adapter.login()
+    adapter._client.search_scrip_result = {"status": True, "data": sbin_matches}
+
+    result = adapter.resolve_equity_symbol("NSE", "SBIN")
+    assert result["tradingsymbol"] == "SBIN-EQ"
+
+
+def test_resolve_equity_symbol_raises_rather_than_guess_when_no_exact_equity_match_exists(fake_client):
+    adapter = AngelOneAdapter(_creds())
+    adapter.login()
+    adapter._client.search_scrip_result = {
+        "status": True,
+        "data": [{"exchange": "NSE", "tradingsymbol": "NOTREAL-BE", "symboltoken": "1"}],
+    }
+    with pytest.raises(AngelOneError):
+        adapter.resolve_equity_symbol("NSE", "NOTREAL")
+
+
 def test_get_historical_candles_parses_the_confirmed_array_order(fake_client):
     from datetime import datetime
 
@@ -232,6 +267,59 @@ def test_get_historical_candles_rejects_an_unsupported_interval(fake_client):
         )
 
 
+class _FakeWebSocketApp:
+    """Stands in for websocket.WebSocketApp -- captures the callbacks
+    AngelOneLiveFeed.start() registers so a test can invoke them directly
+    with whatever arity actually broke live, without any real network
+    connection (run_forever below returns immediately, no blocking loop)."""
+
+    last_instance: "_FakeWebSocketApp | None" = None
+
+    def __init__(self, url, header=None, on_open=None, on_error=None, on_close=None,
+                 on_data=None, on_ping=None, on_pong=None):
+        self.on_error = on_error
+        self.on_close = on_close
+        self.run_forever_called = False
+        _FakeWebSocketApp.last_instance = self
+
+    def run_forever(self, **kwargs):
+        self.run_forever_called = True
+
+
+def test_live_feed_on_error_and_on_close_tolerate_the_real_arity_mismatch(monkeypatch):
+    """Regression test for a real bug found live against a real Angel One
+    account (project-5f): the installed smartapi-python 1.5.5's own
+    _on_close is declared to accept only (self, wsapp), but the installed
+    websocket-client calls its on_close callback with (wsapp,
+    close_status_code, close_msg) -- confirmed via inspect.signature
+    against both installed packages, not assumed. Separately, smartapi-
+    python's own _on_error internally calls self.on_error with 2 extra
+    string args against a base on_error(self) stub that accepts none.
+    Both raised TypeError from inside websocket-client's own callback
+    dispatch, which combined with the SDK's own auto-reconnect into a
+    storm that hit Angel One's real rate limiter repeatedly across
+    multiple symbols in a few seconds. AngelOneLiveFeed.start() bypasses
+    SmartWebSocketV2.connect() entirely and registers its own safe
+    callbacks instead -- this test proves those callbacks tolerate the
+    EXACT arities that broke the real SDK's own.
+    """
+    fake_ws_module = types.ModuleType("websocket")
+    fake_ws_module.WebSocketApp = _FakeWebSocketApp
+    monkeypatch.setitem(sys.modules, "websocket", fake_ws_module)
+
+    feed = AngelOneLiveFeed(auth_token="jwt-1", api_key="key-1", client_code="C1", feed_token="feed-1")
+    feed.start(on_tick=lambda data: None)
+    feed._thread.join(timeout=2)
+
+    assert _FakeWebSocketApp.last_instance is not None
+    assert _FakeWebSocketApp.last_instance.run_forever_called
+
+    # Must NOT raise -- these are the exact call shapes that broke the
+    # real SDK's own on_error/_on_close.
+    _FakeWebSocketApp.last_instance.on_error("wsapp-stub", "some error")
+    _FakeWebSocketApp.last_instance.on_close("wsapp-stub", 1006, "abnormal closure")
+
+
 # --- Router-level: POST /orders (mode=live) and POST /orders/{id}/confirm ---
 
 
@@ -242,11 +330,27 @@ class _StubAdapter:
             {"tradingsymbol": "RELIANCE-EQ", "symboltoken": "2885", "exchange": "NSE"}
         ]
         self.cancelled: list[str] = []
+        self.last_place_order_kwargs: dict | None = None
 
     def search_symbol_token(self, exchange, query):
         return self.search_matches
 
+    def resolve_equity_symbol(self, exchange, symbol):
+        # Mirrors AngelOneAdapter.resolve_equity_symbol exactly -- see
+        # test_resolve_equity_symbol_never_takes_an_unfiltered_first_match
+        # below for why this exact-match filter is load-bearing, not the
+        # weaker "ends with -EQ" a first version of the real fix used.
+        matches = self.search_symbol_token(exchange, symbol)
+        expected = f"{symbol.upper()}-EQ"
+        equity_matches = [m for m in matches if str(m.get("tradingsymbol", "")).upper() == expected]
+        if not equity_matches:
+            raise AngelOneError(f"could not resolve {symbol!r} to a standard NSE equity instrument")
+        if len(equity_matches) > 1:
+            raise AngelOneError(f"symbol {symbol!r} matched more than one NSE equity entry -- refusing to guess")
+        return equity_matches[0]
+
     def place_order(self, **kwargs):
+        self.last_place_order_kwargs = kwargs
         return self.order_id
 
     def cancel_order(self, broker_order_id, variety="NORMAL"):
@@ -292,6 +396,44 @@ def test_confirming_a_live_order_the_broker_rejects_marks_it_rejected_not_stuck_
     orders = client.get("/orders", params={"mode": "live"}).json()
     rejected = next(o for o in orders if o["id"] == pending["id"])
     assert rejected["status"] == "rejected"
+
+
+# Exactly what searchScrip("NSE", "SBIN") returned against a real Angel
+# One account (captured live, project-5f) -- 14 series, only SBIN-EQ the
+# actual stock. matches[0] would have been SBIN-AF. A naive "ends with
+# -EQ" filter is ALSO wrong here: SBINEQWETF-EQ and SBINMID150-EQ are
+# DIFFERENT tickers (searchScrip substring-matches "SBIN") whose own -EQ
+# entries would make a suffix-only filter ambiguous too -- only an EXACT
+# "SBIN-EQ" match is safe. See test_live_market_api.py's identical
+# REAL_SBIN_SEARCH_RESULTS for the read-path version of this same test.
+REAL_SBIN_SEARCH_RESULTS = [
+    {"exchange": "NSE", "tradingsymbol": t, "symboltoken": str(100 + i)}
+    for i, t in enumerate([
+        "SBIN-AF", "SBIN-BE", "SBIN-BL", "SBIN-EQ", "SBIN-IQ", "SBIN-RL", "SBIN-U3", "SBIN-U4",
+        "SBINEQWETF-BL", "SBINEQWETF-EQ", "SBINEQWETF-RL",
+        "SBINMID150-BL", "SBINMID150-EQ", "SBINMID150-RL",
+    ])
+]
+SBIN_EQ_TOKEN = next(m["symboltoken"] for m in REAL_SBIN_SEARCH_RESULTS if m["tradingsymbol"] == "SBIN-EQ")
+
+
+def test_confirming_a_live_order_never_routes_to_the_wrong_instrument(client, monkeypatch):
+    """Regression test for a real-money-safety bug found live: confirming
+    a live SBIN order must place it against SBIN-EQ's own symboltoken,
+    never matches[0] (SBIN-AF -- a different series) and never any of the
+    substring-decoy tickers (SBINEQWETF/SBINMID150) that also surface in
+    the same search and also end in -EQ."""
+    stub = _StubAdapter(search_matches=REAL_SBIN_SEARCH_RESULTS)
+    monkeypatch.setattr("app.routers.orders.get_adapter_for_user", lambda db, user_id: stub)
+    monkeypatch.setattr("app.routers.orders.notify_order_submitted", lambda **kwargs: None)
+
+    pending = client.post("/orders", json={
+        "symbol": "SBIN", "side": "buy", "order_type": "market", "qty": 5, "mode": "live",
+    }).json()
+    confirmed = client.post(f"/orders/{pending['id']}/confirm")
+    assert confirmed.status_code == 200, confirmed.text
+    assert stub.last_place_order_kwargs["symboltoken"] == SBIN_EQ_TOKEN
+    assert stub.last_place_order_kwargs["symbol"] == "SBIN-EQ"
 
 
 def test_confirming_twice_is_rejected_the_second_time(client, monkeypatch):
