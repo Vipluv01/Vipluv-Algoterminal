@@ -4,6 +4,7 @@ import { api, subscribeMarketForMode } from "../api.js";
 import { fmtMoney } from "../format.js";
 import { CandleChart } from "../components/CandleChart.js";
 import { OrderModeBanner } from "../components/OrderModeBanner.js";
+import { LiveOrderConfirmModal } from "../components/LiveOrderConfirmModal.js";
 import { useToast } from "../toast.js";
 import { consumeTicketIntent } from "../ticketIntent.js";
 // Aliased -- this page's own `mode` state already means single/spread
@@ -39,8 +40,11 @@ function SingleTicket({ symbols, symbol, setSymbol, price, prefillSide }) {
   const [takeProfit, setTakeProfit] = React.useState("");
   const [note, setNote] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
+  const [pendingLiveOrder, setPendingLiveOrder] = React.useState(null); // OrderOut | null -- see LiveOrderConfirmModal
   const pxTouchedRef = React.useRef(false);
   const toast = useToast();
+  const tradingMode = useTradingMode();
+  const isLive = tradingMode === "live";
 
   React.useEffect(() => {
     if (!pxTouchedRef.current && price) setPx(price.toFixed(2));
@@ -60,9 +64,19 @@ function SingleTicket({ symbols, symbol, setSymbol, price, prefillSide }) {
         symbol, side, order_type: orderType, qty: qtyNum,
         px: orderType === "limit" ? Number(px) : null,
         stop_loss_px: slNum, take_profit_px: tpNum,
+        mode: tradingMode,
       });
-      if (note.trim()) await api.dashboard.notes.create(note.trim());
-      if (order.filled_qty > 0) {
+      // api.journal.create, not the removed api.dashboard.notes.create --
+      // that endpoint was deleted server-side when Journal.js replaced it
+      // (see app/routers/journal.py's module docstring); calling it threw
+      // here on every note-attached submit, surfacing a false "Order
+      // rejected" toast for an order that had, in fact, already gone
+      // through. Fixed to also link the note to the order it's actually
+      // about, which the old call had no way to do at all.
+      if (note.trim()) await api.journal.create({ text: note.trim(), trade_id: order.id });
+      if (order.status === "pending_confirmation") {
+        setPendingLiveOrder(order);
+      } else if (order.filled_qty > 0) {
         toast(`${order.status === "filled" ? "Filled" : "Partially filled"} ${order.filled_qty}/${qtyNum} @ ₹${order.avg_fill_px?.toFixed(2)}`, "ok");
       } else if (orderType === "market") {
         toast("No fill — no liquidity on the other side right now", "err");
@@ -113,12 +127,13 @@ function SingleTicket({ symbols, symbol, setSymbol, price, prefillSide }) {
       `}
 
       <div class="field" style=${{ marginTop: "4px" }}>
-        <label style=${{ display: "flex", alignItems: "center", gap: "7px", cursor: "pointer", textTransform: "none", letterSpacing: "normal", fontSize: "12px", color: "var(--text-dim)" }}>
-          <input type="checkbox" checked=${showBracket} onChange=${(e) => setShowBracket(e.target.checked)} />
-          Risk Management (Stop Loss / Take Profit)
+        <label style=${{ display: "flex", alignItems: "center", gap: "7px", cursor: isLive ? "not-allowed" : "pointer", textTransform: "none", letterSpacing: "normal", fontSize: "12px", color: "var(--text-dim)", opacity: isLive ? 0.5 : 1 }}
+               title=${isLive ? "Not yet supported for live orders" : undefined}>
+          <input type="checkbox" checked=${showBracket} disabled=${isLive} onChange=${(e) => setShowBracket(e.target.checked)} />
+          Risk Management (Stop Loss / Take Profit)${isLive ? " — not available in live mode yet" : ""}
         </label>
       </div>
-      ${showBracket && html`
+      ${showBracket && !isLive && html`
         <${React.Fragment}>
           <div class="field">
             <label>Stop Loss (₹)</label>
@@ -136,6 +151,12 @@ function SingleTicket({ symbols, symbol, setSymbol, price, prefillSide }) {
       <button class=${`btn btn-block ${side === "buy" ? "btn-buy" : "btn-sell"}`} disabled=${submitting} onClick=${submit}>
         ${submitting ? "Submitting…" : `Submit ${side === "buy" ? "Buy" : "Sell"}`}
       </button>
+
+      ${pendingLiveOrder && html`
+        <${LiveOrderConfirmModal} orders=${[pendingLiveOrder]}
+          onDone=${() => setPendingLiveOrder(null)}
+          onClose=${() => setPendingLiveOrder(null)} />
+      `}
     </div>
   `;
 }
@@ -145,7 +166,10 @@ function SpreadTicket({ pairData }) {
   const [qty, setQty] = React.useState("10");
   const [note, setNote] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
+  const [pendingLiveOrders, setPendingLiveOrders] = React.useState(null); // OrderOut[] | null -- see LiveOrderConfirmModal
   const toast = useToast();
+  const tradingMode = useTradingMode();
+  const isLive = tradingMode === "live";
 
   const hedgeRatio = pairData?.hedge_ratio ?? null;
   const qtyA = parseInt(qty, 10) || 0;
@@ -169,15 +193,37 @@ function SpreadTicket({ pairData }) {
       // open single-leg position from the user.
       orderA = await api.orders.submit({
         symbol: PAIRS_SYMBOL_A, side: sideA, order_type: "market", qty: qtyA, strategy_key: PAIRS_STRATEGY_KEY,
+        mode: tradingMode,
       });
       const orderB = await api.orders.submit({
         symbol: PAIRS_SYMBOL_B, side: sideB, order_type: "market", qty: qtyB, strategy_key: PAIRS_STRATEGY_KEY,
+        mode: tradingMode,
       });
-      if (note.trim()) await api.dashboard.notes.create(note.trim());
-      toast(`Spread submitted — ${PAIRS_SYMBOL_A} ${orderA.filled_qty}/${qtyA}, ${PAIRS_SYMBOL_B} ${orderB.filled_qty}/${qtyB}`, "ok");
+      // api.journal.create, not the removed api.dashboard.notes.create --
+      // see SingleTicket's identical fix above for why the old call threw
+      // on every note-attached submit despite the order(s) already having
+      // gone through.
+      if (note.trim()) await api.journal.create({ text: note.trim(), trade_id: orderA.id });
+
+      // Live orders never fill here -- both legs land as pending_confirmation
+      // with zero broker contact (see LiveOrderConfirmModal's own comment).
+      // Confirmed/rejected TOGETHER, one deliberate action for what the
+      // user experienced as one spread trade, not two disjoint popups.
+      const pending = [orderA, orderB].filter((o) => o.status === "pending_confirmation");
+      if (pending.length) {
+        setPendingLiveOrders(pending);
+      } else {
+        toast(`Spread submitted — ${PAIRS_SYMBOL_A} ${orderA.filled_qty}/${qtyA}, ${PAIRS_SYMBOL_B} ${orderB.filled_qty}/${qtyB}`, "ok");
+      }
       setNote("");
     } catch (e) {
-      if (orderA) {
+      if (orderA && orderA.status === "pending_confirmation") {
+        // Leg A is sitting un-confirmed, un-dispatched -- surfaced for
+        // review/reject specifically, not just left invisible behind an
+        // error toast the way a filled leg A already was below.
+        setPendingLiveOrders([orderA]);
+        toast(`${PAIRS_SYMBOL_B} leg failed before ever submitting: ${e.message || "order rejected"} — ${PAIRS_SYMBOL_A} leg is pending confirmation, review it below before deciding`, "err");
+      } else if (orderA) {
         toast(`${PAIRS_SYMBOL_A} leg went through (${orderA.filled_qty}/${qtyA} filled) but ${PAIRS_SYMBOL_B} leg failed: ${e.message || "order rejected"} — check Pairs for a one-sided position and close it manually if needed`, "err");
       } else {
         toast(e.message || "Order rejected", "err");
@@ -220,6 +266,7 @@ function SpreadTicket({ pairData }) {
         Leg B is sized to the current Kalman hedge ratio, not equal to leg A — the same beta-scaled sizing the
         automated strategy uses. Spread positions are risk-managed by z-score (see the Pairs page's Stop Z-Score),
         not a per-leg price stop, so Risk Management fields aren't offered here.
+        ${isLive ? " Both legs are independent live orders — you'll confirm them together before either reaches the broker." : ""}
       </div>
 
       <${NoteField} note=${note} setNote=${setNote} />
@@ -227,6 +274,12 @@ function SpreadTicket({ pairData }) {
       <button class="btn btn-block btn-primary" disabled=${submitting} onClick=${submit}>
         ${submitting ? "Submitting…" : `Submit ${direction === "long_spread" ? "Long Spread" : "Short Spread"}`}
       </button>
+
+      ${pendingLiveOrders && html`
+        <${LiveOrderConfirmModal} orders=${pendingLiveOrders}
+          onDone=${() => setPendingLiveOrders(null)}
+          onClose=${() => setPendingLiveOrders(null)} />
+      `}
     </div>
   `;
 }
