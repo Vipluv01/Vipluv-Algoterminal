@@ -91,6 +91,12 @@ export const api = {
       return requestWithTotal("GET", `/orders${qs ? `?${qs}` : ""}`);
     },
     submit: (body) => request("POST", "/orders", body),
+    // The ONLY path that reaches a real broker (app/routers/orders.py's
+    // confirm_live_order) -- a mode="live" submit only ever creates a
+    // pending_confirmation row with zero broker contact; this is the
+    // separate, explicit human action that actually dispatches it. See
+    // components/LiveOrderConfirmModal.js for the one UI that calls this.
+    confirm: (id) => request("POST", `/orders/${id}/confirm`),
     cancel: (id) => request("DELETE", `/orders/${id}`),
     brackets: {
       list: (mode) => request("GET", `/orders/brackets${mode ? `?mode=${mode}` : ""}`),

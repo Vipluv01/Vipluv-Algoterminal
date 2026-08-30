@@ -3,6 +3,8 @@ import { html } from "../html.js";
 import { api } from "../api.js";
 import { useToast } from "../toast.js";
 import { OrderModeBanner } from "./OrderModeBanner.js";
+import { LiveOrderConfirmModal } from "./LiveOrderConfirmModal.js";
+import { useMode } from "../mode.js";
 
 // prefill: {side, price, nonce} | undefined -- click-to-trade support.
 // `nonce` (a fresh value, e.g. Date.now(), on every click) is what makes a
@@ -20,8 +22,11 @@ export function OrderEntry({ symbol, price, onOrderPlaced, prefill }) {
   const [stopLoss, setStopLoss] = React.useState("");
   const [takeProfit, setTakeProfit] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
+  const [pendingLiveOrder, setPendingLiveOrder] = React.useState(null); // OrderOut | null -- see LiveOrderConfirmModal
   const pxTouchedRef = React.useRef(false);
   const toast = useToast();
+  const tradingMode = useMode();
+  const isLive = tradingMode === "live";
 
   // Track the live price by default, same UX as the bourse demo's own
   // order form -- but never fight a visitor who's actively typing.
@@ -56,8 +61,17 @@ export function OrderEntry({ symbol, price, onOrderPlaced, prefill }) {
         symbol, side, order_type: orderType, qty: qtyNum,
         px: orderType === "limit" ? Number(px) : null,
         stop_loss_px: slNum, take_profit_px: tpNum,
+        mode: tradingMode,
       });
-      if (order.filled_qty > 0) {
+      // Live orders never fill here -- a mode="live" submit only ever
+      // creates a pending_confirmation row with zero broker contact (see
+      // app/routers/orders.py's _submit_live_order docstring). This is
+      // the one place that hands off to LiveOrderConfirmModal, the sole
+      // UI path to POST /orders/{id}/confirm, which is the sole path
+      // that actually reaches Angel One.
+      if (order.status === "pending_confirmation") {
+        setPendingLiveOrder(order);
+      } else if (order.filled_qty > 0) {
         const bracketNote = (slNum || tpNum) ? " · bracket attached" : "";
         toast(`${order.status === "filled" ? "Filled" : "Partially filled"} ${order.filled_qty}/${qtyNum} @ ₹${order.avg_fill_px?.toFixed(2)}${bracketNote}`, "ok");
       } else if (orderType === "market") {
@@ -102,12 +116,13 @@ export function OrderEntry({ symbol, price, onOrderPlaced, prefill }) {
       `}
 
       <div class="field" style=${{ marginTop: "4px" }}>
-        <label style=${{ display: "flex", alignItems: "center", gap: "7px", cursor: "pointer", textTransform: "none", letterSpacing: "normal", fontSize: "12px", color: "var(--text-dim)" }}>
-          <input type="checkbox" checked=${showBracket} onChange=${(e) => setShowBracket(e.target.checked)} />
-          Risk Management (Stop Loss / Take Profit)
+        <label style=${{ display: "flex", alignItems: "center", gap: "7px", cursor: isLive ? "not-allowed" : "pointer", textTransform: "none", letterSpacing: "normal", fontSize: "12px", color: "var(--text-dim)", opacity: isLive ? 0.5 : 1 }}
+               title=${isLive ? "Not yet supported for live orders" : undefined}>
+          <input type="checkbox" checked=${showBracket} disabled=${isLive} onChange=${(e) => setShowBracket(e.target.checked)} />
+          Risk Management (Stop Loss / Take Profit)${isLive ? " — not available in live mode yet" : ""}
         </label>
       </div>
-      ${showBracket && html`
+      ${showBracket && !isLive && html`
         <${React.Fragment}>
           <div class="field">
             <label>Stop Loss (₹)</label>
@@ -123,6 +138,12 @@ export function OrderEntry({ symbol, price, onOrderPlaced, prefill }) {
       <button class=${`btn btn-block ${side === "buy" ? "btn-buy" : "btn-sell"}`} disabled=${submitting} onClick=${submit}>
         ${submitting ? "Submitting…" : `Submit ${side === "buy" ? "Buy" : "Sell"}`}
       </button>
+
+      ${pendingLiveOrder && html`
+        <${LiveOrderConfirmModal} orders=${[pendingLiveOrder]}
+          onDone=${() => { setPendingLiveOrder(null); onOrderPlaced && onOrderPlaced(); }}
+          onClose=${() => setPendingLiveOrder(null)} />
+      `}
     </div>
   `;
 }
