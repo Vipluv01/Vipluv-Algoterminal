@@ -176,18 +176,6 @@ async def live_market_ws(
         await websocket.close(code=4400, reason=str(e))
         return
 
-    try:
-        # resolve_equity_symbol, not search_symbol_token + matches[0] --
-        # see AngelOneAdapter.resolve_equity_symbol's own docstring on the
-        # real-money/correctness bug this replaces (matches[0] is not
-        # guaranteed to be the actual equity series).
-        match = adapter.resolve_equity_symbol("NSE", symbol)
-        token = match["symboltoken"]
-        adapter.ensure_session()  # AngelOneLiveFeed needs a live jwt/feed token directly, before its first use
-    except AngelOneError as e:
-        await websocket.close(code=4404, reason=str(e))
-        return
-
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
 
@@ -198,11 +186,41 @@ async def live_market_ws(
         # data back to THIS connection's event loop from there.
         loop.call_soon_threadsafe(queue.put_nowait, data)
 
-    try:
+    def _connect() -> None:
+        # Runs OFF the event loop thread via asyncio.to_thread below --
+        # every call here is real, synchronous network I/O (resolve_
+        # equity_symbol and ensure_session both funnel through
+        # AngelOneAdapter._call, which holds _call_lock -- a plain
+        # threading.Lock -- for the full round trip; acquire_feed's own
+        # first-subscriber path does a real WebSocket handshake too).
+        # This function used to run directly in this route's own async
+        # body with no offload -- a real, confirmed incident: opening one
+        # live-mode chart blocked the ENTIRE asyncio event loop for the
+        # duration of that Angel One call, freezing every other request
+        # in the process (a plain POST /orders submission, which never
+        # touches the broker, hung indefinitely while a live WS
+        # connection was mid-resolve). Same lesson app/broker/notify.py's
+        # own docstring already describes -- this route just hadn't
+        # applied it. `to_thread` puts this on a real OS thread instead,
+        # so the lock/network wait blocks that thread, never the loop.
+        #
+        # resolve_equity_symbol, not search_symbol_token + matches[0] --
+        # see AngelOneAdapter.resolve_equity_symbol's own docstring on the
+        # real-money/correctness bug this replaces (matches[0] is not
+        # guaranteed to be the actual equity series).
+        match = adapter.resolve_equity_symbol("NSE", symbol)
+        token = match["symboltoken"]
+        adapter.ensure_session()  # AngelOneLiveFeed needs a live jwt/feed token directly, before its first use
         acquire_feed(
             user_id=user.id, symbol=symbol, adapter=adapter, symboltoken=token,
             subscriber_id=websocket, on_tick=on_tick,
         )
+
+    try:
+        await asyncio.to_thread(_connect)
+    except AngelOneError as e:
+        await websocket.close(code=4404, reason=str(e))
+        return
     except FeedCreationThrottled as e:
         # A real, deliberate rejection -- NOT something this endpoint
         # retries on the caller's behalf (that would just reintroduce the
