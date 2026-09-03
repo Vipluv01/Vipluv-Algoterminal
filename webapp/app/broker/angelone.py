@@ -58,6 +58,29 @@ class AngelOneAuthError(AngelOneError):
     pass
 
 
+# Angel One's real rate-limit rejection ("Access denied because of
+# exceeding access rate") isn't valid JSON, so it never reaches app code
+# as a clean typed exception -- it surfaces as a parse failure whose
+# string form still carries this exact substring (confirmed live,
+# 2026-09-03). String-matching an error message is fragile in general,
+# but this one is distinctive enough, and the alternative (treating every
+# rate-limit rejection as a session failure worth a real re-login) is the
+# actively worse failure mode _call's own docstring explains.
+_RATE_LIMIT_SIGNATURE = "exceeding access rate"
+
+
+def _is_rate_limited(exc: Exception) -> bool:
+    return _RATE_LIMIT_SIGNATURE in str(exc)
+
+
+# One short wait before a single retry on the SAME session -- long enough
+# for Angel One's own rate window to plausibly roll over, short enough
+# not to make an already-slow call feel broken. Not backed by a
+# documented rate-limit window (Angel One doesn't publish one for this
+# endpoint); revisit with real evidence if this turns out to be the
+# wrong order of magnitude.
+_RATE_LIMIT_RETRY_DELAY_SECONDS = 1.5
+
 # SmartWebSocketV2's exchangeType codes (see its own docstring on
 # subscribe()) -- NSE cash-market equities is what every symbol this app
 # trades (NAMED_INSTRUMENTS-style tickers) lives on.
@@ -93,16 +116,29 @@ class AngelOneAdapter:
     """One broker session for one user. Not thread-safe for concurrent
     calls on the SAME instance (matches this codebase's existing "one
     engine per goroutine" discipline elsewhere) -- app/broker/adapter_cache.py
-    hands out one instance per user, and _call below serializes every
-    real call through it with a lock -- an EARLIER version of this
-    docstring claimed "FastAPI's per-request handling already serializes
-    a single user's own requests in practice," which is wrong and was
-    disproven live: Ticker.js's normal polling fires all 7 named symbols'
-    GET /live/market/history requests in parallel (7 simultaneous
-    sync-route threads, all sharing this one cached adapter), and that
-    produced nondeterministic per-request failures under concurrency that
-    never reproduced when the same 7 calls were made sequentially. The
-    lock below is the actual fix, not the (false) assumption it replaces.
+    hands out one instance per user, and _call below coordinates every
+    real call through it -- an EARLIER version of this docstring claimed
+    "FastAPI's per-request handling already serializes a single user's
+    own requests in practice," which is wrong and was disproven live:
+    Ticker.js's normal polling fires all 7 named symbols' GET
+    /live/market/history requests in parallel (7 simultaneous sync-route
+    threads, all sharing this one cached adapter), and that produced
+    nondeterministic per-request failures under concurrency that never
+    reproduced when the same 7 calls were made sequentially.
+
+    A FIRST fix (fully serializing every call, including successful ones,
+    through one lock for its entire duration) closed that race but traded
+    it for a real, separately-found problem: during actual NSE market
+    hours a single real Angel One call can itself take 0.4-2.5s, and with
+    everything -- Ticker's 8-symbol poll, a chart's WS setup, an order
+    confirm -- funneling through ONE lock for the full round trip each,
+    the app visibly hung/degraded under real load (confirmed live,
+    2026-09-03, during market hours). _call below keeps only what
+    actually needs mutual exclusion (login/_refresh mutating the shared
+    access_token/refresh_token/feed_token) behind a lock; a successful
+    fn() call on an already-valid session runs WITHOUT holding it, so
+    concurrent reads can genuinely overlap instead of queueing behind
+    each other one at a time.
     """
 
     def __init__(self, creds: AngelOneCredentials):
@@ -112,13 +148,42 @@ class AngelOneAdapter:
         self._refresh_token: str | None = None
         self._feed_token: str | None = None
         self._logged_in_at: float | None = None
-        # Guards every real call through this adapter -- see _call's own
-        # docstring on the concurrency bug this closes. Not reentrant on
-        # purpose: nothing inside _call/login/_refresh ever calls back
-        # into _call on the same thread, so a plain Lock (not RLock) is
-        # correct and catches an accidental future reentrant call as a
-        # deadlock during testing, rather than silently allowing it.
+        # Guards ONLY login()/_refresh()'s mutation of the shared
+        # access_token/refresh_token/feed_token -- see _call's own
+        # docstring. Not reentrant on purpose: nothing inside
+        # login/_refresh ever calls back into _call on the same thread,
+        # so a plain Lock (not RLock) is correct and catches an
+        # accidental future reentrant call as a deadlock during testing,
+        # rather than silently allowing it.
         self._call_lock = threading.Lock()
+        # Bounds how many real HTTP calls to Angel One this adapter lets
+        # run at once. Tried 4, then 2, in response to real evidence --
+        # confirmed live, 2026-09-03: even at 2 concurrent, a 7-symbol
+        # burst still drew "Access denied because of exceeding access
+        # rate" on 3 of 7 calls, MORE failures than at full serialization,
+        # with no real wall-clock win either. That's the same shape as
+        # the WS connection-limit incident feed_registry.py's own
+        # docstring describes -- Angel One's REST endpoint appears to
+        # reject genuinely OVERLAPPING requests specifically, not just a
+        # raw requests-per-second budget sequential calls would also hit.
+        # Set to 1 (fully serialized reads, same as the very first fix)
+        # until there's real evidence a higher bound is actually safe --
+        # see resolve_equity_symbol's own cache for the real lever that
+        # DOES help here without betting the account on an unverified
+        # concurrency assumption a second time.
+        self._call_semaphore = threading.Semaphore(1)
+        # resolve_equity_symbol's result, keyed by (exchange, symbol) --
+        # ticker->symboltoken is effectively permanent for this adapter's
+        # lifetime (barring a rare corporate action, which would surface
+        # as a clear broker-side rejection on the stale token, not a
+        # silent wrong-instrument route -- the safety property that cache
+        # exists to protect is unaffected by caching a static identifier).
+        # Every real caller (live_market.py's history/WS endpoints AND
+        # orders.py's confirm_live_order) funnels through resolve_equity_
+        # symbol, so this halves the real Angel One traffic for anything
+        # that looks the same symbol up more than once -- which Ticker.js's
+        # own 30s poll cycle does, every cycle, for every symbol, forever.
+        self._resolved_symbol_cache: dict[tuple[str, str], dict] = {}
 
     # -- session -------------------------------------------------------
 
@@ -178,37 +243,57 @@ class AngelOneAdapter:
         regardless of whether it happened on the first call ever made or
         the hundredth.
 
-        Holds self._call_lock for the ENTIRE method, not just around the
-        refresh/re-login fallback -- a real concurrency bug found live:
-        get_adapter_for_user caches one AngelOneAdapter per user, and
-        FastAPI's sync routes each run on their OWN thread, so 7
-        concurrent GET /live/market/history requests (Ticker.js's normal
-        polling, one per named symbol) really do call into this SAME
-        adapter instance from 7 threads at once. Without a lock, a
-        transient failure on ANY one of those threads (a real Angel One
-        rate/concurrency constraint, or nothing more than ordinary
-        network flakiness) would trigger THAT thread's own refresh/
-        re-login, mutating self._client's shared access_token/refresh_
-        token/feed_token while the other 6 threads were mid-request
-        against the SAME shared session state -- and if more than one
-        thread hit this at once, they would race to refresh or even
-        fully re-login concurrently, each invalidating the session the
-        others were about to use. That race is sufficient on its own to
-        produce the exact symptom seen live (sequential calls clean,
-        concurrent calls nondeterministically failing, a different
-        subset each run) independent of whether Angel One's own API
-        additionally enforces a one-in-flight-request-per-session limit
-        server-side. Serializing every call through this lock closes the
-        race unconditionally, and also naturally satisfies a server-side
-        single-in-flight constraint if one exists, since only one HTTP
-        call through this adapter is ever actually in flight at a time.
+        Two-tier concurrency control, not one lock around everything --
+        see the class docstring for why a single full-duration lock (the
+        first fix for the original race) turned into its own real
+        problem under actual market-hours load. self._call_semaphore
+        bounds how many real HTTP calls run at once (throughput/broker-
+        load concern, not correctness). self._call_lock guards ONLY the
+        session-mutating recovery path (login/_refresh writing
+        self._client's shared tokens) -- the ACTUAL race this whole
+        design exists to prevent: two threads independently deciding
+        their call failed and racing to refresh/relogin at the same
+        time, each invalidating the session the other was about to use.
+        A successful fn() call on an already-valid session (the common
+        case) never touches self._call_lock at all, so concurrent reads
+        genuinely overlap instead of queueing one at a time behind
+        whichever call happened to go first.
+
+        A rate-limit response is NOT a session failure, and is handled
+        separately from the refresh/re-login path below -- confirmed
+        live, 2026-09-03: Angel One's real error for this is "Access
+        denied because of exceeding access rate" (not valid JSON, so it
+        surfaces as a parse error, not a clean typed exception). Routing
+        that through refresh()/login() like a real session failure would
+        was actively counterproductive: neither can fix a rate limit,
+        each is itself another real call that only adds to the load
+        causing the limit, and login() additionally burns a real TOTP
+        code for no reason. A rate-limited call instead gets ONE short
+        wait-and-retry on the SAME session -- no lock, no mutation.
         """
-        with self._call_lock:
-            try:
-                if self._client is None:
-                    self.login()
-                return fn()
-            except Exception as first_exc:
+        with self._call_semaphore:
+            first_exc: Exception | None = None
+            if self._client is not None:
+                try:
+                    return fn()
+                except Exception as e:
+                    if _is_rate_limited(e):
+                        time.sleep(_RATE_LIMIT_RETRY_DELAY_SECONDS)
+                        try:
+                            return fn()
+                        except Exception as retry_exc:
+                            raise AngelOneAuthError(
+                                f"Angel One call still rate-limited after one retry: {retry_exc}"
+                            ) from e
+                    first_exc = e
+
+            with self._call_lock:
+                try:
+                    if self._client is None:
+                        self.login()
+                        return fn()
+                except Exception as e:
+                    first_exc = first_exc or e
                 try:
                     self._refresh()
                     return fn()
@@ -282,7 +367,20 @@ class AngelOneAdapter:
         back to an unfiltered guess, when no such entry exists -- a clear
         rejection is the only acceptable failure mode here, not a silent
         wrong-instrument route.
+
+        Caches a successful result by (exchange, symbol) -- see
+        self._resolved_symbol_cache's own docstring on why this is safe
+        to cache (a static identifier, not a price) and why it matters
+        (this is the single biggest real-call reduction available: every
+        repeat lookup of a symbol this adapter has already resolved skips
+        the network entirely). A FAILED resolution is never cached --
+        a transient search failure shouldn't be remembered as permanent.
         """
+        cache_key = (exchange, symbol)
+        cached = self._resolved_symbol_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         matches = self.search_symbol_token(exchange, symbol)
         expected = f"{symbol.upper()}-EQ"
         equity_matches = [
@@ -301,6 +399,7 @@ class AngelOneAdapter:
                 f"symbol {symbol!r} matched more than one NSE equity entry "
                 f"({[m.get('tradingsymbol') for m in equity_matches]}) -- refusing to guess"
             )
+        self._resolved_symbol_cache[cache_key] = equity_matches[0]
         return equity_matches[0]
 
     def place_order(

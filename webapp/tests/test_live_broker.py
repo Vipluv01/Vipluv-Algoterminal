@@ -163,6 +163,47 @@ def test_call_falls_back_to_refresh_then_full_relogin_on_failure(fake_client):
     assert sum(1 for c in real_client.calls if c[0] == "generateSession") == 2
 
 
+def test_rate_limited_call_retries_once_on_the_same_session_not_via_relogin(fake_client, monkeypatch):
+    """Confirmed live, 2026-09-03: Angel One's real rate-limit rejection
+    ("Access denied because of exceeding access rate") used to funnel
+    through the SAME path as a genuine session failure -- refresh(), then
+    a full re-login. Neither can fix a rate limit; both are themselves
+    more real calls that only add to the load causing the limit, and
+    login() additionally burns a real TOTP code for nothing. This proves
+    a rate-limited call now retries once on the EXISTING session instead
+    -- no refresh, no re-login, no lock."""
+    monkeypatch.setattr("app.broker.angelone._RATE_LIMIT_RETRY_DELAY_SECONDS", 0)
+    adapter = AngelOneAdapter(_creds())
+    adapter.login()
+    real_client = adapter._client
+    calls_before = len(real_client.calls)
+
+    attempts = {"n": 0}
+
+    def rate_limited_then_ok():
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise ValueError("Couldn't parse the JSON response received from the server: b'Access denied because of exceeding access rate'")
+        return "ok"
+
+    result = adapter._call(rate_limited_then_ok)
+    assert result == "ok"
+    assert attempts["n"] == 2  # exactly one retry, not funneled through refresh/relogin
+    assert real_client.calls[calls_before:] == []  # neither generateToken nor generateSession -- same session throughout
+
+
+def test_rate_limited_call_that_stays_rate_limited_raises_cleanly(fake_client, monkeypatch):
+    monkeypatch.setattr("app.broker.angelone._RATE_LIMIT_RETRY_DELAY_SECONDS", 0)
+    adapter = AngelOneAdapter(_creds())
+    adapter.login()
+
+    def always_rate_limited():
+        raise ValueError("Access denied because of exceeding access rate")
+
+    with pytest.raises(AngelOneAuthError, match="still rate-limited"):
+        adapter._call(always_rate_limited)
+
+
 def test_the_very_first_call_ever_made_still_raises_angelone_error_not_a_raw_exception(fake_client):
     """Regression test for a real bug, found live: an invalid TOTP secret
     (e.g. "T" -- not valid base32) raises from pyotp INSIDE login(),
@@ -208,15 +249,28 @@ def test_search_symbol_token_returns_the_broker_matches(fake_client):
     assert matches[0]["symboltoken"] == "2885"
 
 
-def test_concurrent_calls_through_one_shared_adapter_never_overlap(fake_client):
-    """Regression test for a real bug found live: get_adapter_for_user
-    caches ONE AngelOneAdapter per user, and Ticker.js's normal polling
-    fires GET /live/market/history for all 7 named symbols in parallel --
-    7 FastAPI sync-route threads calling into the SAME adapter instance
-    at once. Sequential calls were clean; concurrent calls failed
-    nondeterministically (a different subset of symbols each run). This
-    test proves _call now serializes every real call through one adapter,
-    regardless of how many threads try to use it at once."""
+def test_concurrent_calls_through_one_shared_adapter_stay_serialized(fake_client):
+    """get_adapter_for_user caches ONE AngelOneAdapter per user, and
+    Ticker.js's normal polling fires GET /live/market/history for all 7
+    named symbols in parallel -- 7 FastAPI sync-route threads calling
+    into the SAME adapter instance at once.
+
+    _call_semaphore's bound has a real history worth keeping, not just a
+    number: fully serialized (1) closed the original session-mutation
+    race but, under actual market-hours latency (a single real call can
+    take 0.4-2.5s), made the app visibly hang (confirmed live,
+    2026-09-03) -- so this was tried at 4, then narrowed to 2 to get real
+    overlap without guessing at an unverified concurrency ceiling.
+    Neither held up: at 2, a real 7-symbol burst still drew Angel One's
+    "Access denied because of exceeding access rate" on 3 of 7 calls --
+    MORE failures than full serialization, no real wall-clock win either.
+    That's the same shape as the WS connection-limit incident
+    feed_registry.py's own docstring describes -- this REST endpoint
+    appears to reject genuinely overlapping requests specifically, not
+    just a raw requests-per-second budget serialized calls would also
+    hit. Back to 1 until there's real evidence a higher bound is safe;
+    resolve_equity_symbol's own cache is the lever that actually helps
+    here without re-betting the account on that same assumption twice."""
     adapter = AngelOneAdapter(_creds())
     adapter.login()
 
@@ -245,6 +299,52 @@ def test_concurrent_calls_through_one_shared_adapter_never_overlap(fake_client):
     assert max_concurrent == 1, "concurrent calls through the same adapter must never actually overlap"
 
 
+def test_concurrent_session_failures_never_race_the_relogin_path(fake_client):
+    """The actual correctness property _call_lock exists for -- NOT "no
+    two calls ever overlap" (the previous, over-strict version of this
+    test), but "login()/_refresh() mutating the shared access_token/
+    refresh_token/feed_token never runs from two threads at once." Every
+    call here is made to fail its first (unlocked) attempt, forcing all
+    6 threads into the locked recovery path together -- proving that
+    path still fully serializes even though the fast path above no
+    longer does."""
+    adapter = AngelOneAdapter(_creds())
+    adapter.login()
+    adapter._client.searchScrip = lambda exchange, query: (_ for _ in ()).throw(Exception("session expired"))
+
+    login_in_flight = 0
+    max_concurrent_logins = 0
+    state_lock = threading.Lock()
+    real_login = adapter.login
+
+    def _tracked_login():
+        nonlocal login_in_flight, max_concurrent_logins
+        with state_lock:
+            login_in_flight += 1
+            max_concurrent_logins = max(max_concurrent_logins, login_in_flight)
+        time.sleep(0.02)
+        real_login()
+        with state_lock:
+            login_in_flight -= 1
+
+    adapter.login = _tracked_login
+    adapter._refresh = lambda: (_ for _ in ()).throw(Exception("refresh also fails"))
+
+    def _search():
+        try:
+            adapter.search_symbol_token("NSE", "RELIANCE")
+        except Exception:
+            pass  # every call is rigged to fail regardless -- only the race matters here
+
+    threads = [threading.Thread(target=_search) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert max_concurrent_logins == 1, "login()/_refresh() must never run concurrently, regardless of read concurrency"
+
+
 def test_resolve_equity_symbol_never_takes_an_unfiltered_first_match(fake_client):
     """The adapter-level version of the real-money-safety bug regression
     tests above (test_confirming_a_live_order_never_routes_to_the_wrong_
@@ -267,6 +367,46 @@ def test_resolve_equity_symbol_never_takes_an_unfiltered_first_match(fake_client
 
     result = adapter.resolve_equity_symbol("NSE", "SBIN")
     assert result["tradingsymbol"] == "SBIN-EQ"
+
+
+def test_resolve_equity_symbol_caches_a_successful_result(fake_client):
+    """The real lever for reducing Angel One traffic without betting on
+    an unverified concurrency ceiling (see the _call_semaphore history
+    above) -- ticker->symboltoken is effectively permanent, and every
+    real caller (live_market.py's history/WS endpoints, orders.py's
+    confirm_live_order) funnels through this one method, so caching it
+    here cuts real network calls for anything that looks the same symbol
+    up more than once -- which Ticker.js's 30s poll cycle does, forever."""
+    adapter = AngelOneAdapter(_creds())
+    adapter.login()
+    adapter._client.search_scrip_result = {
+        "status": True,
+        "data": [{"exchange": "NSE", "tradingsymbol": "RELIANCE-EQ", "symboltoken": "2885"}],
+    }
+
+    first = adapter.resolve_equity_symbol("NSE", "RELIANCE")
+    second = adapter.resolve_equity_symbol("NSE", "RELIANCE")
+    assert first == second == {"exchange": "NSE", "tradingsymbol": "RELIANCE-EQ", "symboltoken": "2885"}
+    assert sum(1 for c in adapter._client.calls if c[0] == "searchScrip") == 1
+
+
+def test_resolve_equity_symbol_does_not_cache_a_failed_resolution(fake_client):
+    """A transient search failure (or a genuinely unresolvable symbol,
+    e.g. TATAMOTORS post-demerger) must not be remembered as permanent --
+    only a SUCCESSFUL resolution is cache-worthy."""
+    adapter = AngelOneAdapter(_creds())
+    adapter.login()
+    adapter._client.search_scrip_result = {"status": True, "data": []}
+
+    with pytest.raises(AngelOneError):
+        adapter.resolve_equity_symbol("NSE", "TATAMOTORS")
+
+    adapter._client.search_scrip_result = {
+        "status": True,
+        "data": [{"exchange": "NSE", "tradingsymbol": "TATAMOTORS-EQ", "symboltoken": "999"}],
+    }
+    result = adapter.resolve_equity_symbol("NSE", "TATAMOTORS")
+    assert result["tradingsymbol"] == "TATAMOTORS-EQ"
 
 
 def test_resolve_equity_symbol_raises_rather_than_guess_when_no_exact_equity_match_exists(fake_client):
