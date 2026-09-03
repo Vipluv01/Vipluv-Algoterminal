@@ -58,6 +58,44 @@ def test_realized_pnl_curve_starts_empty_and_grows_with_a_closed_round_trip(clie
     assert "equity" not in curve[0], "relabeled explicitly so this can never be read as the mark-to-market curve"
 
 
+def test_attribution_mode_paper_and_virtual_do_not_bleed_into_each_other(client):
+    """Regression test for a real bug found live, 2026-09-03: this
+    endpoint carried NO mode parameter at all before -- it always queried
+    Mode.paper regardless of what was actually selected, so Portfolio IQ
+    silently showed paper's numbers under every mode (a live-mode "shows
+    profit that isn't there" report). A position opened under one mode
+    must not appear in the other mode's own attribution."""
+    client.post("/orders", json={
+        "symbol": "ICICIBANK", "side": "buy", "order_type": "market", "qty": 5, "mode": "virtual",
+    })
+
+    paper = client.get("/portfolio/attribution", params={"mode": "paper"}).json()
+    virtual = client.get("/portfolio/attribution", params={"mode": "virtual"}).json()
+
+    # Paper has no orders at all -- still the trivial all-cash case.
+    assert paper["portfolio_return"] == pytest.approx(0.0)
+    # Virtual holds a real position -- not the trivial all-cash case.
+    assert virtual["computable"] is True
+
+
+def test_attribution_rejects_live_as_a_mode(client):
+    # There is no real mark-to-market registry or benchmark price source
+    # for live positions yet (see get_attribution's own docstring) --
+    # "live" must be a clean validation error, never silently treated as
+    # paper.
+    resp = client.get("/portfolio/attribution", params={"mode": "live"})
+    assert resp.status_code == 422
+
+
+def test_realized_pnl_curve_mode_paper_and_virtual_do_not_bleed_into_each_other(client):
+    client.post("/orders", json={"symbol": "ICICIBANK", "side": "buy", "order_type": "market", "qty": 5, "mode": "virtual"})
+    client.post("/orders", json={"symbol": "ICICIBANK", "side": "sell", "order_type": "market", "qty": 5, "mode": "virtual"})
+
+    assert client.get("/portfolio/realized-pnl-curve", params={"mode": "paper"}).json() == []
+    virtual_curve = client.get("/portfolio/realized-pnl-curve", params={"mode": "virtual"}).json()
+    assert len(virtual_curve) == 2
+
+
 def test_sub_account_breakdown_is_empty_with_no_sub_accounts(client):
     assert client.get("/portfolio/sub-accounts").json() == []
 

@@ -27,6 +27,30 @@ def test_market_order_buy_fills_against_seed_liquidity(client):
     assert body["avg_fill_px"] is not None
 
 
+def test_buy_order_exceeding_available_cash_is_rejected_before_reaching_the_engine(client):
+    """Regression test for a real bug found live, 2026-09-03: nothing in
+    submit_order checked cash at all before this -- a long-running paper
+    account had run to -Rs 53,54,333 because every buy was accepted
+    regardless of available capital. ICICIBANK's seed price is Rs 1250
+    (app/markets.py's NAMED_INSTRUMENTS); qty=1000 needs ~Rs 12,50,000,
+    far past STARTING_PAPER_CASH_DEFAULT (Rs 1,00,000)."""
+    resp = client.post("/orders", json={
+        "symbol": "ICICIBANK", "side": "buy", "order_type": "market", "qty": 1000,
+    })
+    assert resp.status_code == 400, resp.text
+    assert "buying power" in resp.json()["detail"].lower()
+
+
+def test_sell_order_is_not_blocked_by_the_buying_power_check(client):
+    """The check is scoped to buys only -- a sell doesn't spend cash the
+    same simple way (closing a long, or opening a short), so it must not
+    be rejected just because cash happens to be low."""
+    resp = client.post("/orders", json={
+        "symbol": "ICICIBANK", "side": "sell", "order_type": "market", "qty": 1000,
+    })
+    assert resp.status_code == 200, resp.text
+
+
 def test_live_mode_order_only_reaches_pending_confirmation_not_the_broker(client):
     """Phase 7's two-step live flow: submitting mode="live" creates a
     row and stops -- no broker call, no engine, no fill -- until a
