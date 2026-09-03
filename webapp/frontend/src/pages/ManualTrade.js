@@ -5,6 +5,7 @@ import { fmtMoney } from "../format.js";
 import { CandleChart } from "../components/CandleChart.js";
 import { OrderModeBanner } from "../components/OrderModeBanner.js";
 import { LiveOrderConfirmModal } from "../components/LiveOrderConfirmModal.js";
+import { ErrorBoundary } from "../components/ErrorBoundary.js";
 import { useToast } from "../toast.js";
 import { consumeTicketIntent } from "../ticketIntent.js";
 // Aliased -- this page's own `mode` state already means single/spread
@@ -99,7 +100,7 @@ function SingleTicket({ symbols, symbol, setSymbol, price, prefillSide }) {
       <div class="field">
         <label>Symbol</label>
         <select class="input" value=${symbol} onChange=${(e) => setSymbol(e.target.value)}>
-          ${visibleSymbols.map((s) => html`<option key=${s.symbol} value=${s.symbol}>${s.symbol}</option>`)}
+          ${symbols.map((s) => html`<option key=${s.symbol} value=${s.symbol}>${s.symbol}</option>`)}
         </select>
       </div>
 
@@ -346,51 +347,55 @@ export function ManualTrade() {
       </div>
 
       <div class="trade-grid">
-        ${mode === "single"
-          ? html`
-            <div class="panel panel-pad">
-              ${symbol && html`
-                <${React.Fragment}>
-                  <div style=${{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
-                    <span style=${{ fontWeight: 700 }}>${symbol}</span>
-                    ${tick?.price && html`<span class="mono" style=${{ color: "var(--text-dim)" }}>${fmtMoney(tick.price)}</span>`}
-                  </div>
-                  <${CandleChart} symbol=${symbol} price=${tick?.price} height="360px" />
-                <//>
-              `}
-            </div>
-          `
-          : html`
-            <div class="panel panel-pad">
-              <div class="panel-title">Live Spread Stats</div>
-              ${!pairData || pairData.warming_up
-                ? html`<div style=${{ color: "var(--text-faint)", padding: "20px 0" }}>Building up enough price history before spread stats are available.</div>`
-                : html`
-                  <div style=${{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "12px" }} class="dash-stats">
-                    <div class="stat-card">
-                      <div class="stat-label">Spread Z-Score</div>
-                      <div class="stat-value mono">${pairData.zscore?.toFixed(3) ?? "—"}</div>
+        <${ErrorBoundary} label=${mode === "single" ? "Chart" : "Live Spread Stats"}>
+          ${mode === "single"
+            ? html`
+              <div class="panel panel-pad">
+                ${symbol && html`
+                  <${React.Fragment}>
+                    <div style=${{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+                      <span style=${{ fontWeight: 700 }}>${symbol}</span>
+                      ${tick?.price && html`<span class="mono" style=${{ color: "var(--text-dim)" }}>${fmtMoney(tick.price)}</span>`}
                     </div>
-                    <div class="stat-card">
-                      <div class="stat-label">Kalman Hedge Ratio (β)</div>
-                      <div class="stat-value mono">${pairData.hedge_ratio?.toFixed(4) ?? "—"}</div>
-                    </div>
-                    <div class="stat-card">
-                      <div class="stat-label">Cointegration p-value</div>
-                      <div class="stat-value mono">${pairData.cointegration_pvalue?.toFixed(4) ?? "—"}</div>
-                    </div>
-                    <div class="stat-card">
-                      <div class="stat-label">Current Position</div>
-                      <div class="stat-value mono">${pairData.position === "none" ? "Flat" : pairData.position === "long_spread" ? "Long" : "Short"}</div>
-                    </div>
-                  </div>
+                    <${CandleChart} symbol=${symbol} price=${tick?.price} height="360px" />
+                  <//>
                 `}
-            </div>
-          `}
+              </div>
+            `
+            : html`
+              <div class="panel panel-pad">
+                <div class="panel-title">Live Spread Stats</div>
+                ${!pairData || pairData.warming_up
+                  ? html`<div style=${{ color: "var(--text-faint)", padding: "20px 0" }}>Building up enough price history before spread stats are available.</div>`
+                  : html`
+                    <div style=${{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "12px" }} class="dash-stats">
+                      <div class="stat-card">
+                        <div class="stat-label">Spread Z-Score</div>
+                        <div class="stat-value mono">${pairData.zscore?.toFixed(3) ?? "—"}</div>
+                      </div>
+                      <div class="stat-card">
+                        <div class="stat-label">Kalman Hedge Ratio (β)</div>
+                        <div class="stat-value mono">${pairData.hedge_ratio?.toFixed(4) ?? "—"}</div>
+                      </div>
+                      <div class="stat-card">
+                        <div class="stat-label">Cointegration p-value</div>
+                        <div class="stat-value mono">${pairData.cointegration_pvalue?.toFixed(4) ?? "—"}</div>
+                      </div>
+                      <div class="stat-card">
+                        <div class="stat-label">Current Position</div>
+                        <div class="stat-value mono">${pairData.position === "none" ? "Flat" : pairData.position === "long_spread" ? "Long" : "Short"}</div>
+                      </div>
+                    </div>
+                  `}
+              </div>
+            `}
+        <//>
 
-        ${mode === "single"
-          ? html`<${SingleTicket} symbols=${symbols} symbol=${symbol} setSymbol=${setSymbol} price=${tick?.price} prefillSide=${ticketIntent?.side} />`
-          : html`<${SpreadTicket} pairData=${pairData} />`}
+        <${ErrorBoundary} label="Ticket">
+          ${mode === "single"
+            ? html`<${SingleTicket} symbols=${visibleSymbols} symbol=${symbol} setSymbol=${setSymbol} price=${tick?.price} prefillSide=${ticketIntent?.side} />`
+            : html`<${SpreadTicket} pairData=${pairData} />`}
+        <//>
       </div>
     </div>
   `;
