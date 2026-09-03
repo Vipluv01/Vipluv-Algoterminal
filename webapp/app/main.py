@@ -39,11 +39,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.auth import DEV_USER_GOOGLE_SUB
 from app.brackets import monitor_brackets
+from app.broker.adapter_cache import IncompleteBrokerCredentialError, NoBrokerCredentialError, get_adapter_for_user
+from app.broker.angelone import AngelOneError
 from app.db import SessionLocal
 from app.execution.slicer import run_algo_orders_once
 from app.migrate import run_migrations
-from app.markets import MarketRegistry
+from app.markets import MarketRegistry, NAMED_INSTRUMENTS
+from app.models.user import User
 from app.pairs_service import refresh_pair_telemetry_once, reset_pair_telemetry
 from app.telemetry import reset_order_submit_latencies
 from app.risk.circuit_breaker import run_circuit_breakers_once
@@ -67,6 +71,16 @@ MARKET_TICK_SECONDS = 1.0
 # behavior, not a bug; the fix is keeping deterministic API tests off the
 # clock, not chasing timing.
 DISABLE_MARKET_TICK = os.environ.get("DISABLE_MARKET_TICK") == "1"
+# Same reasoning, same tests/conftest.py gate, for a real (if less
+# obvious) reason: this warm-up builds a genuine AngelOneAdapter and
+# makes real Angel One network calls off of whatever LiveBrokerCredential
+# row happens to be in the DB. A test that inserts a fake/dummy
+# credential row to exercise the vault or live-order flow would
+# otherwise have THIS startup path try to log in to the real Angel One
+# with garbage values on every single test run -- confirmed live: the
+# full suite hung well past its normal ~90s runtime the one time this
+# ran unguarded.
+DISABLE_LIVE_WARMUP = os.environ.get("DISABLE_LIVE_WARMUP") == "1"
 
 
 async def _tick_loop(registry: MarketRegistry) -> None:
@@ -105,6 +119,52 @@ async def _tick_loop(registry: MarketRegistry) -> None:
         await asyncio.sleep(MARKET_TICK_SECONDS)
 
 
+def _warm_live_symbol_cache_sync() -> None:
+    """Runs OFF the event loop (via asyncio.to_thread below) -- every
+    resolve_equity_symbol call here is real, synchronous Angel One I/O,
+    the same reason live_market.py's own WS _connect() offloads.
+
+    Real latency bug this closes (confirmed live, 2026-09-04): a fresh
+    server start has an empty AngelOneAdapter._resolved_symbol_cache, so
+    the FIRST real live-mode request after every restart pays the full
+    cost of resolving every symbol it needs from scratch -- confirmed
+    directly, GET /live/market/quotes for 6 symbols took 8-35s cold
+    (each resolve_equity_symbol is a real ~1-2s searchScrip round trip,
+    paid sequentially -- see _call_semaphore's own docstring on why
+    parallelizing these was already tried and made real rate-limit
+    failures MORE frequent, not fewer, so this closes the gap by
+    removing the need for the request-time cost entirely instead).
+    Warming all 7 NAMED_INSTRUMENTS once here means every real user-
+    facing request from then on -- the ticker's first poll, the first
+    live chart, the first live order -- hits an already-warm cache
+    instead of being the unlucky one that pays for it.
+
+    Never raises: no stored credential yet, an incomplete one, or a
+    transient Angel One failure are all real, expected states this
+    startup path must survive -- live mode simply stays uncached until
+    first real use in any of those cases, exactly like before this
+    warm-up existed."""
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.google_sub == DEV_USER_GOOGLE_SUB).first()
+        if user is None:
+            return
+        try:
+            adapter = get_adapter_for_user(db, user.id)
+        except (NoBrokerCredentialError, IncompleteBrokerCredentialError):
+            return
+        for symbol in NAMED_INSTRUMENTS:
+            try:
+                adapter.resolve_equity_symbol("NSE", symbol)
+            except AngelOneError:
+                # One symbol failing to resolve (TATAMOTORS -- zero real
+                # listings, confirmed live) must not stop the other 6
+                # real ones from warming.
+                continue
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     run_migrations()
@@ -113,11 +173,22 @@ async def lifespan(app: FastAPI):
     reset_pair_telemetry()
     reset_order_submit_latencies()
     tick_task = None if DISABLE_MARKET_TICK else asyncio.create_task(_tick_loop(registry))
+    # Fire-and-forget, NOT awaited -- app startup/readiness must never
+    # wait on a real network call to a broker that might not even have a
+    # credential stored yet, or might be briefly unreachable. Runs in the
+    # background; live mode's first real request is simply unwarmed (the
+    # old, already-acceptable behavior) if this hasn't finished yet.
+    warmup_task = (
+        None if DISABLE_LIVE_WARMUP
+        else asyncio.create_task(asyncio.to_thread(_warm_live_symbol_cache_sync))
+    )
     try:
         yield
     finally:
         if tick_task is not None:
             tick_task.cancel()
+        if warmup_task is not None:
+            warmup_task.cancel()
         registry.close()
 
 

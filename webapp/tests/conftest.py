@@ -20,6 +20,16 @@ os.environ["DISABLE_MARKET_TICK"] = "1"
 # on-disk algoterminal.db -- once per TestClient, i.e. once per test. Off.
 os.environ["DISABLE_AUTO_MIGRATE"] = "1"
 
+# Off for the same reason as DISABLE_MARKET_TICK above, for a sharper
+# reason: this warm-up builds a real AngelOneAdapter and makes real
+# Angel One network calls off whatever LiveBrokerCredential row happens
+# to be in the test's own DB. A test inserting a fake/dummy credential
+# row (to exercise the vault or live-order flow) would otherwise have
+# this try to log in to the real Angel One with garbage values on every
+# single test run -- confirmed live: the full suite hung well past its
+# normal runtime the one time this ran here unguarded.
+os.environ["DISABLE_LIVE_WARMUP"] = "1"
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
