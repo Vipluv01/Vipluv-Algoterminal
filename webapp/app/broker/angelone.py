@@ -99,6 +99,22 @@ CANDLE_INTERVALS: dict[str, str] = {
 }
 
 
+@dataclass(frozen=True)
+class Quote:
+    """One real quote from getMarketData's FULL mode -- see
+    AngelOneAdapter.get_quote_batch's own docstring on why ltp alone
+    isn't enough (a real, confirmed staleness problem for illiquid
+    contracts) and best_bid/best_ask come from the live order book
+    instead. Any field can be None -- a genuinely unquoted side of the
+    book, or a contract Angel One has no data for at all, are both real,
+    distinct, expected states, not error conditions."""
+
+    ltp: float | None
+    close: float | None
+    best_bid: float | None
+    best_ask: float | None
+
+
 @dataclass
 class AngelOneCredentials:
     """Already-decrypted -- the caller (app/broker/adapter_cache.py)
@@ -484,6 +500,72 @@ class AngelOneAdapter:
             ts_ms = int(datetime.fromisoformat(ts_iso).astimezone(timezone.utc).timestamp() * 1000)
             bars.append({"timestamp_ms": ts_ms, "open": o, "high": h, "low": l, "close": c, "volume": v})
         return bars
+
+    def get_quote_batch(self, exchange_tokens: dict[str, list[str]]) -> dict[str, "Quote"]:
+        """Real, batched quotes via getMarketData -- confirmed live,
+        2026-09-03, to fetch multiple tokens across DIFFERENT exchange
+        segments (e.g. NSE equity + NFO options) in one real call. This
+        is what makes an options chain (dozens of strikes) fetchable
+        without hammering Angel One's rate limit one contract at a time,
+        the same lesson _call_semaphore's own history already
+        establishes for equities, just applied here from the start
+        instead of learned the hard way a second time.
+
+        MAX_TOKENS_PER_BATCH is not a guess -- confirmed live directly:
+        exactly 50 tokens succeeds, 60 fails with Angel One's own real
+        "Tokens max limit exceeded" (errorcode AB4029). Splits a larger
+        request into multiple real calls transparently; each batch still
+        goes through _call, so the same session-refresh/rate-limit
+        handling applies to every one of them, not just the first.
+
+        Uses mode="FULL", not "LTP" -- confirmed live this matters, not
+        just "more data than needed": last_traded_price for a THINLY
+        traded contract can be a real trade from HOURS or a full day
+        earlier (confirmed directly: one NIFTY strike's LTP carried
+        exchTradeTime from the PREVIOUS session, 34% off its live
+        bid/ask midpoint) -- a real, defensible "current price" for an
+        options chain needs the live order book, not just whichever
+        stale trade happened to be last. best_bid/best_ask come from
+        FULL mode's own depth.buy[0]/depth.sell[0] (0.0 when the book's
+        side is genuinely empty, not absent -- an illiquid contract with
+        no resting interest on one side is a real, distinct state from
+        "never quoted at all").
+
+        Returns {token: Quote}. A token Angel One's own response reports
+        as "unfetched" (a real, expected outcome -- e.g. a genuinely
+        untraded far strike) is simply absent from the result rather
+        than raising, since a caller building a chain display needs to
+        render "no quote" for ONE strike, not fail the whole chain.
+        """
+        MAX_TOKENS_PER_BATCH = 50
+        result: dict[str, Quote] = {}
+        # Flatten to (exchange, token) pairs first so batching splits
+        # cleanly across exchange-segment boundaries too -- a single
+        # exchange with >50 tokens must not silently get merged into
+        # the next exchange's batch.
+        flat: list[tuple[str, str]] = [
+            (exchange, token) for exchange, tokens in exchange_tokens.items() for token in tokens
+        ]
+        for i in range(0, len(flat), MAX_TOKENS_PER_BATCH):
+            batch = flat[i:i + MAX_TOKENS_PER_BATCH]
+            batch_by_exchange: dict[str, list[str]] = {}
+            for exchange, token in batch:
+                batch_by_exchange.setdefault(exchange, []).append(token)
+            response = self._call(lambda be=batch_by_exchange: self._client.getMarketData("FULL", be))
+            if not response or not response.get("status"):
+                message = (response or {}).get("message", "market data request failed")
+                raise AngelOneError(f"Angel One batch quote failed: {message}")
+            for row in (response.get("data") or {}).get("fetched") or []:
+                depth = row.get("depth") or {}
+                buys = depth.get("buy") or []
+                sells = depth.get("sell") or []
+                result[row["symbolToken"]] = Quote(
+                    ltp=row.get("ltp"),
+                    close=row.get("close"),
+                    best_bid=(buys[0]["price"] if buys and buys[0].get("price") else None),
+                    best_ask=(sells[0]["price"] if sells and sells[0].get("price") else None),
+                )
+        return result
 
 
 class AngelOneLiveFeed:

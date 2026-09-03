@@ -10,6 +10,12 @@ __pycache__/
 # docstring) -- a per-day log file it creates unconditionally, not
 # something this app writes on purpose or wants committed.
 logs/
+# Angel One's real instrument master -- a downloadable, periodically-
+# refreshed 33MB cache (app/broker/instrument_master.py), not source.
+# Committing it would also mean shipping a point-in-time snapshot that
+# goes stale the moment strikes roll over -- the whole reason this module
+# re-downloads it on a real schedule instead of reading a fixed file.
+data/angelone_instrument_master.json
 # e2e diff output and ad-hoc captures are generated build artifacts, not
 # source -- screenshots/baseline/ IS tracked: gap2_visual_diff.py's own
 # docstring says it diffs against "the frozen tests/e2e/screenshots/baseline/

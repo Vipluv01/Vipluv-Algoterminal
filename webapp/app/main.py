@@ -48,8 +48,8 @@ from app.pairs_service import refresh_pair_telemetry_once, reset_pair_telemetry
 from app.telemetry import reset_order_submit_latencies
 from app.risk.circuit_breaker import run_circuit_breakers_once
 from app.routers import (
-    account, dashboard, journal, leaderboard, live_market, market, market_ws, optimizer, options, orders, pairs,
-    portfolio, risk, strategies, telemetry, vault, virtual,
+    account, dashboard, journal, leaderboard, live_market, live_options, market, market_ws, optimizer, options,
+    orders, pairs, portfolio, risk, strategies, telemetry, vault, virtual,
 )
 from app.strategy_runner import run_strategies_once
 
@@ -172,6 +172,7 @@ app.include_router(leaderboard.router)
 app.include_router(telemetry.router)
 app.include_router(virtual.router)
 app.include_router(live_market.router)
+app.include_router(live_options.router)
 
 
 @app.get("/healthz")
