@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Callable
 
@@ -100,6 +100,12 @@ CANDLE_INTERVALS: dict[str, str] = {
 
 
 @dataclass(frozen=True)
+class DepthLevel:
+    px: float
+    qty: int
+
+
+@dataclass(frozen=True)
 class Quote:
     """One real quote from getMarketData's FULL mode -- see
     AngelOneAdapter.get_quote_batch's own docstring on why ltp alone
@@ -107,12 +113,28 @@ class Quote:
     contracts) and best_bid/best_ask come from the live order book
     instead. Any field can be None -- a genuinely unquoted side of the
     book, or a contract Angel One has no data for at all, are both real,
-    distinct, expected states, not error conditions."""
+    distinct, expected states, not error conditions.
+
+    bids/asks carry FULL mode's own multi-level depth.buy/depth.sell
+    (best_bid/best_ask are just their own [0] element, kept as separate
+    fields since most callers -- the options chain -- only ever needed
+    the single best level). Real Angel One responses pad depth.buy/
+    depth.sell to a fixed number of slots even when fewer levels are
+    genuinely resting, using the SAME {price: 0.0, quantity: 0} sentinel
+    already established for an empty best-level slot -- those trailing
+    empty slots are dropped here, not included as fake zero-price rows."""
 
     ltp: float | None
     close: float | None
     best_bid: float | None
     best_ask: float | None
+    # Defaulted (not required) so existing callers/tests constructing a
+    # Quote for just ltp/close/best_bid/best_ask (most of them, since
+    # full multi-level depth is a newer, live-equity-order-book-specific
+    # need) don't all need updating -- get_quote_batch, the one real
+    # production constructor, always passes these explicitly regardless.
+    bids: list[DepthLevel] = field(default_factory=list)
+    asks: list[DepthLevel] = field(default_factory=list)
 
 
 @dataclass
@@ -559,11 +581,19 @@ class AngelOneAdapter:
                 depth = row.get("depth") or {}
                 buys = depth.get("buy") or []
                 sells = depth.get("sell") or []
+                # Real levels only -- drop the {price: 0.0, quantity: 0}
+                # padding slots Angel One's own response fills unused
+                # depth positions with, same sentinel convention
+                # best_bid/best_ask below already treat as "no quote".
+                bid_levels = [DepthLevel(px=b["price"], qty=int(b.get("quantity") or 0)) for b in buys if b.get("price")]
+                ask_levels = [DepthLevel(px=s["price"], qty=int(s.get("quantity") or 0)) for s in sells if s.get("price")]
                 result[row["symbolToken"]] = Quote(
                     ltp=row.get("ltp"),
                     close=row.get("close"),
                     best_bid=(buys[0]["price"] if buys and buys[0].get("price") else None),
                     best_ask=(sells[0]["price"] if sells and sells[0].get("price") else None),
+                    bids=bid_levels,
+                    asks=ask_levels,
                 )
         return result
 

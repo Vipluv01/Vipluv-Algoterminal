@@ -163,10 +163,25 @@ def get_live_history(
     return HistoryOut(symbol=symbol, interval=interval, requested_bars=limit, returned_bars=len(bars), bars=bars)
 
 
+class DepthLevelOut(BaseModel):
+    px: float
+    qty: int
+
+
 class QuoteOut(BaseModel):
     symbol: str
     ltp: float | None
     close: float | None  # real previous close from Angel One's own quote -- None if unresolvable/unquoted
+    # Real multi-level order-book depth (Quote.bids/asks, FULL mode's own
+    # depth.buy/depth.sell) -- the SAME real data the options chain
+    # already uses, now also on the equity quote so a live-mode order
+    # book can show real resting depth instead of the WS LTP feed's own
+    # empty bids/asks (see live_market_ws's own _live_tick_to_payload,
+    # unchanged -- that feed genuinely carries no depth; this is a
+    # separate, REST-polled source for it). Empty list, not missing/None,
+    # when a side is genuinely unquoted.
+    bids: list[DepthLevelOut]
+    asks: list[DepthLevelOut]
 
 
 class QuotesOut(BaseModel):
@@ -224,9 +239,13 @@ def get_live_quotes(
     quotes = []
     for token, sym in token_to_symbol.items():
         q = quote_by_token.get(token)
-        quotes.append(QuoteOut(symbol=sym, ltp=q.ltp if q else None, close=q.close if q else None))
+        quotes.append(QuoteOut(
+            symbol=sym, ltp=q.ltp if q else None, close=q.close if q else None,
+            bids=[DepthLevelOut(px=lvl.px, qty=lvl.qty) for lvl in q.bids] if q else [],
+            asks=[DepthLevelOut(px=lvl.px, qty=lvl.qty) for lvl in q.asks] if q else [],
+        ))
     for sym in unresolved:
-        quotes.append(QuoteOut(symbol=sym, ltp=None, close=None))
+        quotes.append(QuoteOut(symbol=sym, ltp=None, close=None, bids=[], asks=[]))
     return QuotesOut(quotes=quotes)
 
 

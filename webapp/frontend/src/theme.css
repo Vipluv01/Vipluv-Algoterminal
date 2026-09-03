@@ -982,8 +982,21 @@ a:hover { text-decoration: underline; }
 .tape-tag { font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; letter-spacing: 0.04em; }
 .tape-tag.pos { background: var(--bid-dim); color: var(--bid-bright); }
 .tape-tag.neg { background: var(--ask-dim); color: var(--ask-bright); }
-.dash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
-.dash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+.dash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: stretch; }
+/* Dashboard's own top stat row -- was an inline style plus a `dash-stats`
+   class with no matching rule (dead reference); every card here now
+   shares the SAME internal alignment (left-aligned, stretched to an
+   equal height) instead of one-off per-card flex overrides, which is
+   what made the row read as uneven ("some portion left blank" -- the
+   Profit Factor card's own gauge was centered while every neighboring
+   card was left-aligned, at a visibly different content height). */
+.dash-stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 18px; align-items: stretch; }
+.dash-stats .stat-card { display: flex; flex-direction: column; align-items: flex-start; }
+.dash-stats .stat-card > * + * { margin-top: 4px; }
+@media (max-width: 900px) {
+  .dash-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dash-grid { grid-template-columns: minmax(0, 1fr); }
+}
 .strategies-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
 .charts-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
 .accounts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }

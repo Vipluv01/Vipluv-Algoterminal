@@ -328,8 +328,23 @@ export function CandleChart({ symbol, price, height = "440px", stale = false, on
     if (price !== null && price !== undefined) onTick(price);
   }, [price, onTick]);
 
+  // Real bug fixed here (reported live: exiting fullscreen left the page
+  // stuck wide, no visible way back). The container's own style.height
+  // already flips back correctly via isFullscreen (calc(100vh - 40px) ->
+  // the normal `height` prop), but klinecharts' internal canvas doesn't
+  // necessarily re-measure on its own just because its container's CSS
+  // changed -- it was still relying on the generic window `resize`
+  // listener below, which the Fullscreen API doesn't reliably fire
+  // synchronously with the DOM actually finishing its transition on
+  // every browser. Explicitly resizing here, one frame after the real
+  // fullscreenchange event (so the container has already settled to its
+  // POST-transition size before klinecharts measures it), closes that
+  // gap directly instead of hoping a same-tick `resize` event covers it.
   React.useEffect(() => {
-    const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
+    const onFsChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+      requestAnimationFrame(() => chartRef.current && chartRef.current.resize());
+    };
     document.addEventListener("fullscreenchange", onFsChange);
     return () => document.removeEventListener("fullscreenchange", onFsChange);
   }, []);

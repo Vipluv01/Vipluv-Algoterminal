@@ -6,6 +6,7 @@ import { CandleChart } from "../components/CandleChart.js";
 import { OrderModeBanner } from "../components/OrderModeBanner.js";
 import { LiveOrderConfirmModal } from "../components/LiveOrderConfirmModal.js";
 import { ErrorBoundary } from "../components/ErrorBoundary.js";
+import { LiveSymbolSearch } from "../components/LiveSymbolSearch.js";
 import { useToast } from "../toast.js";
 import { consumeTicketIntent } from "../ticketIntent.js";
 // Aliased -- this page's own `mode` state already means single/spread
@@ -96,6 +97,13 @@ function SingleTicket({ symbols, symbol, setSymbol, price, prefillSide }) {
     <div class="panel panel-pad order-ticket-panel">
       <div class="panel-title">Ticket</div>
       <${OrderModeBanner} />
+
+      ${isLive && html`
+        <div class="field">
+          <label>Search Any Real Stock (Live)</label>
+          <${LiveSymbolSearch} onSelect=${setSymbol} />
+        </div>
+      `}
 
       <div class="field">
         <label>Symbol</label>
@@ -308,7 +316,13 @@ export function ManualTrade() {
   // certainly the corporate demerger) -- this ticket's own symbol
   // picker needs the same live-mode filter, not just Terminal's.
   const visibleSymbols = tradingMode === "live" ? symbols.filter((s) => s.live_tradable) : symbols;
+  // Skipped entirely while in live mode -- `symbol` there can be a real
+  // equity picked via the LiveSymbolSearch below, drawn from the full
+  // ~2000+ real universe (GET /live/market/equities), not the curated
+  // 7-name `symbols` array this effect checks against. Same fix Terminal.js
+  // needed for the identical reason -- see that file's own comment.
   React.useEffect(() => {
+    if (tradingMode === "live") return;
     if (!symbol || !visibleSymbols.length) return;
     if (!visibleSymbols.some((s) => s.symbol === symbol)) {
       setSymbol(visibleSymbols[0].symbol);

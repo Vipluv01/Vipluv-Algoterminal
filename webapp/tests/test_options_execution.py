@@ -145,6 +145,27 @@ def test_mark_option_positions_returns_a_mark_for_every_distinct_open_contract(d
     assert marks[key] > 0
 
 
+def test_mark_option_positions_dedupes_repeat_orders_on_the_same_contract(db, user, registry):
+    """Regression test for the real perf bug found live, 2026-09-04: a
+    long-running paper account had 63,736 filled option orders behind
+    just 19 distinct contracts (the same contract re-traded thousands of
+    times) -- mark_option_positions was fetching every ORM Order object
+    just to de-dupe by symbol in Python. The query was switched to only
+    the 5 columns actually needed; this confirms the real behavior
+    (exactly one mark per distinct contract, regardless of how many
+    orders exist for it) is unchanged."""
+    expiry = chain.list_expiries()[0].date
+    strike = _atm_strike(registry, "NIFTY50")
+    for _ in range(5):
+        submit_option_paper_order(
+            db, registry, user_id=user.id, strategy_key=None, underlying="NIFTY50",
+            option_type="CE", strike=strike, expiry_iso=expiry, side="buy", qty=1,
+        )
+    marks = mark_option_positions(db, user.id, registry)
+    key = chain.build_contract_key("NIFTY50", expiry, strike, "CE")
+    assert list(marks.keys()) == [key]
+
+
 def test_moved_underlying_changes_option_unrealized_pnl(db, user):
     """The exact scenario 5.4a calls for: without merging a live BSM mark
     into current_prices, compute_account's current_prices.get(symbol,

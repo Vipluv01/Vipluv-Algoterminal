@@ -516,6 +516,31 @@ def test_get_quote_batch_treats_the_real_empty_depth_sentinel_as_no_quote(fake_c
     assert result["EMPTY_DEPTH"].best_ask is None
 
 
+def test_get_quote_batch_bids_asks_carry_the_real_depth_levels(fake_client):
+    """bids/asks are the FULL depth.buy/depth.sell arrays (DepthLevel
+    px/qty pairs), not just the single best_bid/best_ask level those two
+    fields already covered -- what a live equity order book actually
+    needs to show real resting depth instead of the WS LTP feed's own
+    empty bids/asks (see live_market.py's QuoteOut docstring)."""
+    adapter = AngelOneAdapter(_creds())
+    adapter.login()
+    result = adapter.get_quote_batch({"NSE": ["5"]})
+    q = result["5"]
+    assert len(q.bids) == 1 and q.bids[0].px == q.best_bid and q.bids[0].qty == 10
+    assert len(q.asks) == 1 and q.asks[0].px == q.best_ask and q.asks[0].qty == 10
+
+
+def test_get_quote_batch_empty_depth_sentinel_yields_empty_bids_asks(fake_client):
+    """The same real {price: 0.0, quantity: 0} sentinel best_bid/best_ask
+    already treat as "no quote" must not leak into bids/asks as a fake
+    zero-price level."""
+    adapter = AngelOneAdapter(_creds())
+    adapter.login()
+    result = adapter.get_quote_batch({"NFO": ["EMPTY_DEPTH"]})
+    assert result["EMPTY_DEPTH"].bids == []
+    assert result["EMPTY_DEPTH"].asks == []
+
+
 def test_get_quote_batch_omits_unfetched_tokens_rather_than_raising(fake_client):
     """A real, expected outcome (an illiquid or delisted token Angel One
     has no current data for) must not fail the whole batch -- the caller
