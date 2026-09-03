@@ -151,7 +151,7 @@ export function App() {
         <nav class="topnav">
           <a href="#/" class="brand" style=${{ textDecoration: "none" }}>
             <span class="brand-mark">A</span>
-            <span>algoterminal</span>
+            <span>VS Algoterminal</span>
           </a>
           <div class=${`nav-links ${mobileNavOpen ? "open" : ""}`}>
             ${NAV_ITEMS.map((item) => html`
