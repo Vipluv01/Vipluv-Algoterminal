@@ -708,3 +708,78 @@ def test_confirming_twice_is_rejected_the_second_time(client, monkeypatch):
     assert first.status_code == 200
     second = client.post(f"/orders/{pending['id']}/confirm")
     assert second.status_code == 400
+
+
+def test_live_option_order_only_reaches_pending_confirmation_not_the_broker(client):
+    """The options analogue of test_live_mode_order_only_reaches_pending_
+    confirmation_not_the_broker in test_orders_api.py -- submitting
+    mode="live" for an option creates a row and stops, zero broker
+    contact, until a separate confirm call."""
+    resp = client.post("/options/orders", json={
+        "underlying": "NIFTY", "option_type": "CE", "strike": 22250.0,
+        "expiry": "06OCT2026", "side": "buy", "qty": 1, "lot_size": 65, "mode": "live",
+    })
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "pending_confirmation"
+    assert body["avg_fill_px"] is None
+
+    orders = client.get("/orders", params={"mode": "live"}).json()
+    order = next(o for o in orders if o["id"] == body["id"])
+    assert order["broker_order_id"] is None
+
+
+def test_confirming_a_live_option_order_resolves_the_real_contract_and_dispatches(client, monkeypatch):
+    """The options analogue of test_confirming_a_live_order_dispatches_
+    through_the_adapter_and_notifies -- confirm resolves the order's own
+    structured fields (underlying/expiry/strike/option_type) through
+    resolve_option_contract (not by re-parsing the synthetic symbol
+    string), places against the REAL tradingsymbol/token/exchange, and
+    converts lots to units (qty * lot_size) for the real broker call."""
+    from app.broker.instrument_master import OptionContract
+
+    stub = _StubAdapter()
+    monkeypatch.setattr("app.routers.orders.get_adapter_for_user", lambda db, user_id: stub)
+    monkeypatch.setattr("app.routers.orders.notify_order_submitted", lambda **kwargs: None)
+    fake_contract = OptionContract(
+        token="40677", tradingsymbol="NIFTY06OCT2622250CE", underlying="NIFTY",
+        expiry="06OCT2026", strike=22250.0, option_type="CE", lot_size=65, exchange_segment="NFO",
+    )
+    monkeypatch.setattr("app.routers.orders.resolve_option_contract", lambda *a, **k: fake_contract)
+
+    pending = client.post("/options/orders", json={
+        "underlying": "NIFTY", "option_type": "CE", "strike": 22250.0,
+        "expiry": "06OCT2026", "side": "buy", "qty": 2, "lot_size": 65, "mode": "live",
+    }).json()
+    confirmed = client.post(f"/orders/{pending['id']}/confirm")
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["status"] == "submitted"
+
+    kwargs = stub.last_place_order_kwargs
+    assert kwargs["symbol"] == "NIFTY06OCT2622250CE"
+    assert kwargs["symboltoken"] == "40677"
+    assert kwargs["exchange"] == "NFO"
+    assert kwargs["qty"] == 130  # 2 lots * 65 lot_size, NOT 2 raw units
+    assert kwargs["product_type"] == "CARRYFORWARD"  # NOT the equity path's default INTRADAY
+
+
+def test_confirming_a_live_option_order_with_no_real_contract_is_rejected_not_stuck(client, monkeypatch):
+    """resolve_option_contract returning None (the real, expected outcome
+    for a strike/expiry the exchange doesn't actually list) must become
+    a clear terminal rejection, never a silent guess and never an order
+    stuck in pending_confirmation forever."""
+    stub = _StubAdapter()
+    monkeypatch.setattr("app.routers.orders.get_adapter_for_user", lambda db, user_id: stub)
+    monkeypatch.setattr("app.routers.orders.resolve_option_contract", lambda *a, **k: None)
+
+    pending = client.post("/options/orders", json={
+        "underlying": "NIFTY", "option_type": "CE", "strike": 99999.0,
+        "expiry": "06OCT2026", "side": "buy", "qty": 1, "lot_size": 65, "mode": "live",
+    }).json()
+    resp = client.post(f"/orders/{pending['id']}/confirm")
+    assert resp.status_code == 502
+    assert stub.last_place_order_kwargs is None  # never reached place_order at all
+
+    orders = client.get("/orders", params={"mode": "live"}).json()
+    rejected = next(o for o in orders if o["id"] == pending["id"])
+    assert rejected["status"] == "rejected"
