@@ -68,6 +68,34 @@ class _FakeSmartConnect:
         self.calls.append(("searchScrip", (exchange, searchscrip), {}))
         return self.search_scrip_result
 
+    def getMarketData(self, mode, exchangeTokens):
+        self.calls.append(("getMarketData", (mode, exchangeTokens), {}))
+        fetched = []
+        for exchange, tokens in exchangeTokens.items():
+            for token in tokens:
+                if token == "UNFETCHABLE":
+                    continue
+                if token == "EMPTY_DEPTH":
+                    # Angel One's own real convention (confirmed live,
+                    # 2026-09-03): an empty depth slot is {price: 0.0,
+                    # quantity: 0}, not the absence of a "buy"/"sell" key.
+                    buy = [{"price": 0.0, "quantity": 0, "orders": 0}]
+                    sell = [{"price": 0.0, "quantity": 0, "orders": 0}]
+                else:
+                    # Offset well clear of 0 -- token "1" must never
+                    # coincidentally produce a real price of exactly 0.0,
+                    # which would collide with the empty-slot sentinel above.
+                    base = float(token) + 100
+                    buy = [{"price": base - 1, "quantity": 10, "orders": 1}]
+                    sell = [{"price": base + 1, "quantity": 10, "orders": 1}]
+                fetched.append({
+                    "exchange": exchange, "tradingSymbol": f"SYM{token}", "symbolToken": token,
+                    "ltp": float(token) if token != "EMPTY_DEPTH" else 0.0,
+                    "close": (float(token) + 1) if token != "EMPTY_DEPTH" else 0.0,
+                    "depth": {"buy": buy, "sell": sell},
+                })
+        return {"status": True, "message": "SUCCESS", "data": {"fetched": fetched, "unfetched": []}}
+
     def position(self):
         return {"status": True, "data": [{"tradingsymbol": "RELIANCE-EQ", "netqty": "10"}]}
 
@@ -444,6 +472,59 @@ def test_get_historical_candles_rejects_an_unsupported_interval(fake_client):
             exchange="NSE", symboltoken="2885", interval="3m",
             from_dt=datetime(2026, 1, 1), to_dt=datetime(2026, 1, 2),
         )
+
+
+def test_get_quote_batch_splits_requests_at_the_confirmed_50_token_limit(fake_client):
+    """MAX_TOKENS_PER_BATCH=50 in get_quote_batch is not a guess -- see
+    its own docstring: confirmed live against the real account,
+    2026-09-03, exactly 50 tokens succeeds and 60 fails with Angel One's
+    real "Tokens max limit exceeded" (errorcode AB4029). This proves the
+    split actually happens at that boundary, not just that the method
+    runs without error under it."""
+    adapter = AngelOneAdapter(_creds())
+    adapter.login()
+    tokens = [str(i) for i in range(1, 121)]  # 120 tokens -> 3 batches of 50/50/20
+
+    result = adapter.get_quote_batch({"NFO": tokens})
+
+    calls = [c for c in adapter._client.calls if c[0] == "getMarketData"]
+    assert len(calls) == 3
+    assert [len(c[1][1]["NFO"]) for c in calls] == [50, 50, 20]
+    assert len(result) == 120
+    assert result["1"].ltp == 1.0
+    assert result["1"].best_bid == 100.0
+    assert result["1"].best_ask == 102.0
+
+
+def test_get_quote_batch_merges_across_exchange_segments(fake_client):
+    adapter = AngelOneAdapter(_creds())
+    adapter.login()
+    result = adapter.get_quote_batch({"NSE": ["2885"], "NFO": ["40677"]})
+    assert set(result.keys()) == {"2885", "40677"}
+
+
+def test_get_quote_batch_treats_the_real_empty_depth_sentinel_as_no_quote(fake_client):
+    """Angel One's own real convention, confirmed live 2026-09-03: an
+    empty side of the book is {price: 0.0, quantity: 0}, not an absent
+    key -- a genuine options quote never prices at exactly 0.0 (there's
+    always a minimum tick above it), so this is a real, meaningful
+    sentinel to treat as "no bid/ask," not a price to report as-is."""
+    adapter = AngelOneAdapter(_creds())
+    adapter.login()
+    result = adapter.get_quote_batch({"NFO": ["EMPTY_DEPTH"]})
+    assert result["EMPTY_DEPTH"].best_bid is None
+    assert result["EMPTY_DEPTH"].best_ask is None
+
+
+def test_get_quote_batch_omits_unfetched_tokens_rather_than_raising(fake_client):
+    """A real, expected outcome (an illiquid or delisted token Angel One
+    has no current data for) must not fail the whole batch -- the caller
+    (a chain display) needs to render "no quote" for ONE contract, not
+    lose every other strike over it."""
+    adapter = AngelOneAdapter(_creds())
+    adapter.login()
+    result = adapter.get_quote_batch({"NFO": ["1", "UNFETCHABLE", "2"]})
+    assert set(result.keys()) == {"1", "2"}
 
 
 class _FakeWebSocketApp:
