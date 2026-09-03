@@ -32,6 +32,89 @@ function fmtOps(n) {
   return n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : `${(n / 1e3).toFixed(0)}K`;
 }
 
+// Derived FROM THROUGHPUT_SCALING/LATENCY_PERCENTILES above, not a
+// second hardcoded copy of the same 4 numbers -- so this can't quietly
+// drift from the real data those two already carry.
+const HERO_METRICS = [
+  `${fmtOps(THROUGHPUT_SCALING[THROUGHPUT_SCALING.length - 1].opsPerSec)} ops/sec sustained`,
+  `${LATENCY_PERCENTILES.submit.p50}ns p50 submit`,
+  `${LATENCY_PERCENTILES.cancel.p50}ns p50 cancel`,
+  `${LATENCY_PERCENTILES.sweep.p50}ns p50 sweep`,
+];
+
+// Every "Bourse Core" claim here maps to a specific, already-verified
+// fact elsewhere on this page or in the repo README -- not a new number
+// invented for the table. Matching-engine latency is stated as "80ns p50
+// submit" specifically (not a blanket "<80ns"), since sweep's own real
+// p50 is 123ns -- a blanket sub-80ns claim would be false for that op,
+// the same mistake corrected earlier when this page's hero badge was
+// written. "Zero steady-state allocations" is qualified with the real
+// number right after it (16 total, across 27M ops, all structural/
+// capacity-growth per the README's arena-allocator section, not per-
+// operation garbage) rather than left as an unqualified superlative.
+const COMPARISON = [
+  {
+    dimension: "Matching Engine",
+    traditional: "Backtest replay / simulated fill guesses",
+    bourse: "Real Go deterministic matching engine (80ns p50 submit)",
+  },
+  {
+    dimension: "Pairs Strategy",
+    traditional: "Basic correlation / moving average",
+    bourse: "Real Engle-Granger cointegration test + Kalman-filtered hedge ratio",
+  },
+  {
+    dimension: "Options Pricing",
+    traditional: "Static lookup tables",
+    bourse: "Black-Scholes Greeks computed and re-marked live from the underlying",
+  },
+  {
+    dimension: "Risk & Sizing",
+    traditional: "Unbounded position sizing",
+    bourse: "Fractional Kelly sizing with a hard exposure ceiling",
+  },
+  {
+    dimension: "Execution Safety",
+    traditional: "Unchecked automated API execution",
+    bourse: "3-tier mode system + explicit human-gated confirmation on every live order",
+  },
+  {
+    dimension: "Memory / Overhead",
+    traditional: "Heavy Python/JS runtime overhead",
+    bourse: "Zero steady-state allocations (16 total, across 27,000,000 operations)",
+  },
+];
+
+function HeroMetricTicker() {
+  const track = [...HERO_METRICS, ...HERO_METRICS]; // duplicated once, same seamless-loop trick Ticker.js's own track uses
+  return html`
+    <div class="ticker landing-metric-ticker">
+      <div class="ticker-track">
+        ${track.map((m, i) => html`<span key=${i} class="ticker-item mono">${m}</span>`)}
+      </div>
+    </div>
+  `;
+}
+
+function ComparisonSection() {
+  return html`
+    <div class="glass-panel panel-pad comparison-table">
+      <div class="comparison-row comparison-header">
+        <div>Dimension</div>
+        <div>Traditional Platforms &amp; Backtesters</div>
+        <div>AlgoTerminal (Bourse Core)</div>
+      </div>
+      ${COMPARISON.map((row) => html`
+        <div key=${row.dimension} class="comparison-row">
+          <div class="comparison-dim">${row.dimension}</div>
+          <div class="comparison-traditional">${row.traditional}</div>
+          <div class="comparison-bourse"><span class="comparison-check">✓</span>${row.bourse}</div>
+        </div>
+      `)}
+    </div>
+  `;
+}
+
 // Eases the DISPLAYED number toward a real value on change -- the value
 // itself never leaves THROUGHPUT_SCALING's 4 measured rows, this only
 // animates the transition between two already-real numbers when a user
@@ -279,6 +362,7 @@ function BenchmarkExplorer() {
 function EngineBlueprint() {
   return html`
     <div class="glass-panel panel-pad">
+      <span class="section-kicker">[ ARCHITECTURE ]</span>
       <div style=${{ fontWeight: 700, fontSize: "14px", marginBottom: "4px" }}>Engine blueprint, not a generic feature list</div>
       <div style=${{ color: "var(--text-faint)", fontSize: "12px", marginBottom: "14px" }}>
         The real design decisions behind the numbers alongside — see the repo README's own "Core design" section.
@@ -410,6 +494,10 @@ export function Landing() {
         </div>
       </div>
 
+      <div class="landing-container" style=${{ marginTop: "40px" }}>
+        <${HeroMetricTicker} />
+      </div>
+
       <div class="landing-container landing-section">
         <div class="landing-stats glass-panel">
           <div class="stat-card"><div class="stat-label">Strategies</div><div class="stat-value mono">${strategyCount ?? "—"}</div></div>
@@ -431,6 +519,7 @@ export function Landing() {
       </div>
 
       <div class="landing-container landing-section">
+        <span class="section-kicker">[ STRATEGIES ]</span>
         <div style=${{ fontWeight: 700, fontSize: "16px", marginBottom: "4px" }}>Five real strategies, one engine</div>
         <div style=${{ color: "var(--text-faint)", fontSize: "12.5px", marginBottom: "18px" }}>
           Each tab is the strategy's actual decision rule (from its own source file), not a performance chart —
@@ -440,6 +529,7 @@ export function Landing() {
       </div>
 
       <div class="landing-container landing-section">
+        <span class="section-kicker">[ BENCHMARKS ]</span>
         <div style=${{ fontWeight: 700, fontSize: "16px", marginBottom: "4px" }}>See it, don't just take the numbers above on faith</div>
         <div style=${{ color: "var(--text-faint)", fontSize: "12.5px", marginBottom: "18px" }}>
           Every real benchmark configuration this project has actually measured — and the engine internals behind them.
@@ -451,6 +541,17 @@ export function Landing() {
       </div>
 
       <div class="landing-container landing-section">
+        <span class="section-kicker">[ COMPARISON ]</span>
+        <div style=${{ fontWeight: 700, fontSize: "16px", marginBottom: "4px" }}>Why AlgoTerminal / Bourse Core?</div>
+        <div style=${{ color: "var(--text-faint)", fontSize: "12.5px", marginBottom: "18px" }}>
+          Every claim on the right maps to a fact already shown elsewhere on this page or in the repo README —
+          not a new number invented for this table.
+        </div>
+        <${ComparisonSection} />
+      </div>
+
+      <div class="landing-container landing-section">
+        <span class="section-kicker">[ MODES ]</span>
         <div style=${{ fontWeight: 700, fontSize: "16px", marginBottom: "4px" }}>Three modes, one platform</div>
         <div style=${{ color: "var(--text-faint)", fontSize: "12.5px", marginBottom: "18px" }}>
           The same strategies, the same matching engine, the same account panel — only the capital and the broker
