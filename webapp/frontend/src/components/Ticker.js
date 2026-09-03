@@ -119,8 +119,18 @@ export function Ticker() {
 
   if (!symbols.length) return null;
 
+  // Live mode: don't DISPLAY a symbol this strip can never have real
+  // data for either -- a derived index (NIFTY50/BANKNIFTY, no live
+  // quote source at all) or a non-live_tradable name (TATAMOTORS) would
+  // otherwise sit there as a permanent "—", which reads as broken rather
+  // than as the honest "no data" it actually is. Matches the same
+  // live_tradable filter Terminal.js's own symbol picker already applies
+  // -- this is the read-only strip's display-side equivalent, not a new
+  // rule.
+  const displaySymbols = mode === "live" ? symbols.filter((s) => s.live_tradable) : symbols;
+
   const staleThreshold = mode === "live" ? LIVE_TICKER_STALE_THRESHOLD_MS : DEFAULT_STALE_THRESHOLD_MS;
-  const items = symbols.map((s) => {
+  const items = displaySymbols.map((s) => {
     const price = ticks[s.symbol];
     // Live mode's %-change is real-LTP-vs-real-previous-close
     // (liveCloses, from api.live.quotes); paper/virtual's own price AND

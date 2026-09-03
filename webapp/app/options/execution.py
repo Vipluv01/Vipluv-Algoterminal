@@ -101,15 +101,28 @@ def mark_option_positions(db: Session, user_id: int, registry: MarketRegistry) -
     since an option contract key is never a key current_prices() already
     knows about on its own.
     """
-    option_orders = (
-        db.query(Order)
+    # Only the 5 columns actually needed, not full ORM Order objects --
+    # confirmed live, 2026-09-04: a long-running paper account (real
+    # automated options strategies firing continuously all session) had
+    # 63,736 filled/partial option orders behind just 19 distinct
+    # contracts. Materializing all 63,736 into full Order ORM objects
+    # (every column, identity-mapped) just to throw away everything but
+    # (symbol, underlying, strike, expiry, option_type) and de-dupe by
+    # symbol was a real, measurable chunk of GET /account's latency --
+    # this account panel is polled every few seconds (AccountPanel.js),
+    # so that cost was being paid over and over. De-duped in Python, NOT
+    # via .distinct(Order.symbol) at the SQL level -- that emits
+    # PostgreSQL's own DISTINCT ON syntax, which SQLite (this app's local
+    # dev/test database) doesn't support at all.
+    rows = (
+        db.query(Order.symbol, Order.underlying, Order.strike, Order.expiry, Order.option_type)
         .filter(Order.user_id == user_id, Order.instrument_type == InstrumentType.option,
                 Order.status.in_([OrderStatus.filled, OrderStatus.partially_filled]))
         .all()
     )
     marks: dict[str, float] = {}
-    for o in option_orders:
-        if o.symbol in marks:
+    for symbol, underlying, strike, expiry, option_type in rows:
+        if symbol in marks:
             continue
-        marks[o.symbol] = option_theoretical_price(o.underlying, o.strike, o.expiry, o.option_type, registry)
+        marks[symbol] = option_theoretical_price(underlying, strike, expiry, option_type, registry)
     return marks

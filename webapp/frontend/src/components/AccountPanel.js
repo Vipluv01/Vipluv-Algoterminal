@@ -54,9 +54,18 @@ export function AccountPanel({ refreshKey }) {
     }
   }, [mode]);
 
+  // refreshKey (bumped by Terminal.js right after an order/close action)
+  // still refetches IMMEDIATELY -- this interval is only the background
+  // safety net for activity this tab didn't itself cause (an automated
+  // strategy filling, a bracket triggering). 10s, not 4s: GET /account
+  // walks this user's FULL paper order history every call (confirmed
+  // live, 2026-09-04: a long-running paper account with 107K+ orders
+  // made this a real, measurable cost, not a free local read) -- a
+  // background poll doesn't need to pay that as often as a genuinely
+  // interactive action does.
   React.useEffect(() => { load(); }, [load, refreshKey]);
   React.useEffect(() => {
-    const id = setInterval(load, 4000);
+    const id = setInterval(load, 10000);
     return () => clearInterval(id);
   }, [load]);
 

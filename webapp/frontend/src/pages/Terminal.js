@@ -8,6 +8,7 @@ import { OrderEntry } from "../components/OrderEntry.js";
 import { AccountPanel } from "../components/AccountPanel.js";
 import { TimeAndSales } from "../components/TimeAndSales.js";
 import { ErrorBoundary } from "../components/ErrorBoundary.js";
+import { LiveSymbolSearch } from "../components/LiveSymbolSearch.js";
 import { DEFAULT_STALE_THRESHOLD_MS, useStaleness } from "../clock.js";
 import { useMode } from "../mode.js";
 
@@ -44,20 +45,36 @@ function useSymbolStats(symbol, mode) {
           const q = quotesRes.quotes[0];
           const bar = histRes.bars[histRes.bars.length - 1];
           const changePct = q?.ltp != null && q?.close ? ((q.ltp - q.close) / q.close) * 100 : null;
-          setStats({ changePct, high: bar?.high ?? null, low: bar?.low ?? null, volume: bar?.volume ?? null });
+          // lastPrice: a real fallback for the header's own price cell
+          // for the gap between page load and the live WS delivering its
+          // first tick -- this is the SAME real LTP already fetched here
+          // to compute changePct, not a second, separate value.
+          //
+          // bids/asks: real order-book depth (getMarketData's own FULL-
+          // mode depth.buy/depth.sell, see angelone.py's Quote docstring)
+          // -- the live WS feed's own ticks carry NONE (Angel One's LTP-
+          // mode stream, no depth at all), which is the real reason the
+          // order book always read as empty in live mode. Reused from
+          // this SAME already-scheduled quotes call rather than adding a
+          // second poll -- one real Angel One request serving both the
+          // header stats and the order book depth.
+          setStats({
+            changePct, high: bar?.high ?? null, low: bar?.low ?? null, volume: bar?.volume ?? null,
+            lastPrice: q?.ltp ?? null, bids: q?.bids ?? [], asks: q?.asks ?? [],
+          });
         } else {
           const hist = await api.market.history(symbol, "1hr", 24);
           if (cancelled) return;
           const bars = hist.bars;
-          if (!bars.length) { setStats({ changePct: null, high: null, low: null, volume: null }); return; }
+          if (!bars.length) { setStats({ changePct: null, high: null, low: null, volume: null, lastPrice: null, bids: [], asks: [] }); return; }
           const high = Math.max(...bars.map((b) => b.high));
           const low = Math.min(...bars.map((b) => b.low));
           const volume = bars.reduce((s, b) => s + (b.volume ?? 0), 0);
           const changePct = bars[0].open ? ((bars[bars.length - 1].close - bars[0].open) / bars[0].open) * 100 : null;
-          setStats({ changePct, high, low, volume });
+          setStats({ changePct, high, low, volume, lastPrice: bars[bars.length - 1].close });
         }
       } catch {
-        if (!cancelled) setStats({ changePct: null, high: null, low: null, volume: null });
+        if (!cancelled) setStats({ changePct: null, high: null, low: null, volume: null, lastPrice: null, bids: [], asks: [] });
       }
     }
     load();
@@ -71,15 +88,19 @@ function useSymbolStats(symbol, mode) {
   return stats;
 }
 
-function SymbolStatsHeader({ symbol, price, mode }) {
-  const stats = useSymbolStats(symbol, mode);
+function SymbolStatsHeader({ symbol, price, mode, stats }) {
   const windowLabel = mode === "live" ? "24h" : "Session";
   const changeClass = stats?.changePct == null ? "" : stats.changePct >= 0 ? "pos" : "neg";
+  // Prefer the live WS tick's own price; fall back to the real LTP/close
+  // useSymbolStats already fetched (never a fabricated placeholder) for
+  // the gap between page load and the WS delivering its first tick --
+  // that gap otherwise showed a bare "—" even once real data existed.
+  const displayPrice = price ?? stats?.lastPrice ?? null;
   return html`
     <div class="symbol-stats-header">
       <div>
         <div class="stat-label">${symbol}</div>
-        <div class="mono" style=${{ fontSize: "20px", fontWeight: 700 }}>${price ? fmtMoney(price) : "—"}</div>
+        <div class="mono" style=${{ fontSize: "20px", fontWeight: 700 }}>${displayPrice ? fmtMoney(displayPrice) : "—"}</div>
       </div>
       <div>
         <div class="stat-label">${windowLabel} Change</div>
@@ -99,52 +120,6 @@ function SymbolStatsHeader({ symbol, price, mode }) {
         <div class="stat-label">${windowLabel} Volume</div>
         <div class="mono stat-value">${stats?.volume != null ? fmtNum(stats.volume) : "—"}</div>
       </div>
-    </div>
-  `;
-}
-
-// Every real NSE equity (~2000+), not just this app's own 7-symbol
-// simulated universe -- fetched once (it's a local instrument-master
-// lookup server-side, no real Angel One call, but still no reason to
-// re-fetch on every keystroke).
-function useLiveEquityNames() {
-  const [names, setNames] = React.useState(null); // null = not loaded yet
-  React.useEffect(() => {
-    let cancelled = false;
-    api.live.equities().then((rows) => { if (!cancelled) setNames(rows); }).catch(() => { if (!cancelled) setNames([]); });
-    return () => { cancelled = true; };
-  }, []);
-  return names;
-}
-
-// Live-mode-only symbol search -- the curated SymbolTabs strip below
-// still exists (and stays the quick-access set for the 7 names this
-// app's own simulated engine also models), but live-mode trading/data
-// endpoints already accept ANY resolvable real symbol string (confirmed:
-// live_market_ws's own _connect(), get_live_history, and the live order
-// submit/confirm path never validate against NAMED_INSTRUMENTS at all --
-// the picker was the only thing actually narrower than what the backend
-// supports). Results capped at 20 -- this is a type-to-filter search
-// over ~2000 real names, not a browsable list.
-function LiveSymbolSearch({ onSelect }) {
-  const allNames = useLiveEquityNames();
-  const [query, setQuery] = React.useState("");
-  const matches = query.trim() && allNames
-    ? allNames.filter((n) => n.toUpperCase().includes(query.trim().toUpperCase())).slice(0, 20)
-    : [];
-
-  return html`
-    <div class="live-symbol-search">
-      <input class="input" type="text" value=${query} disabled=${!allNames}
-             placeholder=${allNames ? `Search any of ${allNames.length.toLocaleString()} real NSE stocks…` : "Loading real equity list…"}
-             onInput=${(e) => setQuery(e.target.value)} />
-      ${matches.length > 0 && html`
-        <div class="live-symbol-results">
-          ${matches.map((n) => html`
-            <div key=${n} class="live-symbol-result" onClick=${() => { onSelect(n); setQuery(""); }}>${n}</div>
-          `)}
-        </div>
-      `}
     </div>
   `;
 }
@@ -258,6 +233,25 @@ export function Terminal() {
   else status = "reconnecting";
 
   const tick = ticks[active];
+  const stats = useSymbolStats(active, tradingMode);
+  // Live mode's WS tick carries NO depth (Angel One's LTP-mode stream,
+  // confirmed -- see live_market.py's own _live_tick_to_payload). Merge
+  // in the REAL depth useSymbolStats already polled via getMarketData's
+  // FULL mode (the same real data the options chain uses) rather than
+  // showing OrderBook an always-empty book in live mode. Paper/virtual
+  // are untouched -- their own WS tick already carries real simulated
+  // depth directly, nothing to merge.
+  const orderBookTick = tradingMode === "live" && tick
+    ? {
+        ...tick, bids: stats?.bids ?? [], asks: stats?.asks ?? [],
+        // OrderBook's own Depth-tab mid-price/spread read best_bid/
+        // best_ask directly (not derived from bids/asks itself) -- the
+        // live WS tick's own values are always null (see above), so
+        // these need the same real-depth override, taken from the SAME
+        // real bids/asks just merged in (their own best/first level).
+        best_bid: stats?.bids?.[0]?.px ?? null, best_ask: stats?.asks?.[0]?.px ?? null,
+      }
+    : tick;
   const modeSubtitle = tradingMode === "live"
     ? "Live trading via Angel One — every order is human-confirmed before it reaches the broker"
     : tradingMode === "virtual"
@@ -289,7 +283,7 @@ export function Terminal() {
 
       ${active && html`
         <${ErrorBoundary} label="Symbol Stats">
-          <${SymbolStatsHeader} symbol=${active} price=${tick?.price} mode=${tradingMode} />
+          <${SymbolStatsHeader} symbol=${active} price=${tick?.price} mode=${tradingMode} stats=${stats} />
         <//>
       `}
 
@@ -297,7 +291,7 @@ export function Terminal() {
         <div class="terminal-grid">
           <div style=${{ display: "flex", flexDirection: "column", gap: "14px" }}>
             <${ErrorBoundary} label="Order Book">
-              <${OrderBook} tick=${tick} stale=${status !== "live"}
+              <${OrderBook} tick=${orderBookTick} stale=${status !== "live"}
                             onLevelClick=${(side, price) => setOrderPrefill({ side, price, nonce: Date.now() })} />
             <//>
             <${ErrorBoundary} label="Time & Sales"><${TimeAndSales} tick=${tick} symbol=${active} /><//>

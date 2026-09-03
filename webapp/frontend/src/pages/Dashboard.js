@@ -5,6 +5,7 @@ import { fmtMoney, fmtPct, pnlClass } from "../format.js";
 import { Calendar } from "../components/Calendar.js";
 import { Sparkline } from "../components/Sparkline.js";
 import { Gauge } from "../components/Gauge.js";
+import { useMode } from "../mode.js";
 
 function StatCard({ label, value, valueClass = "", sub, right }) {
   return html`
@@ -74,6 +75,7 @@ function NotesPanel() {
 export function Dashboard() {
   const [stats, setStats] = React.useState(null);
   const [calendar, setCalendar] = React.useState([]);
+  const mode = useMode();
 
   React.useEffect(() => {
     api.dashboard.stats().then(setStats);
@@ -88,17 +90,26 @@ export function Dashboard() {
       <h1 style=${{ margin: "0 0 4px", fontSize: "20px", fontWeight: 800, letterSpacing: "-0.01em" }}>Dashboard</h1>
       <div style=${{ color: "var(--text-faint)", fontSize: "12px", marginBottom: "20px" }}>Performance across every strategy and manual trade, paper mode</div>
 
-      <div style=${{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "12px", marginBottom: "18px" }} class="dash-stats">
+      ${mode !== "paper" && html`
+        <div class="notice-banner" style=${{ marginBottom: "18px" }}>
+          <strong>Paper mode data, always:</strong> this dashboard tracks paper-mode strategy/manual-trade
+          performance only, and keeps updating from real ongoing paper activity regardless of which mode you have
+          selected (currently ${mode}) -- it is not showing ${mode} activity, and there may be none. Switch to
+          Paper mode to trade against what's shown here.
+        </div>
+      `}
+
+      <div class="dash-stats">
         <${StatCard} label="Net P&L" value=${fmtMoney(stats?.net_pnl)} valueClass=${pnlClass(stats?.net_pnl)}
           right=${html`<${Sparkline} values=${equityCurve} />`} />
         <${StatCard} label="Trade Win Rate" value=${fmtPct(stats?.win_rate)} sub=${stats ? `${stats.n_trades} trades` : ""} />
-        <div class="stat-card" style=${{ display: "flex", flexDirection: "column" }}>
+        <div class="stat-card">
           <div class="stat-label">Day Win Rate</div>
           <div class=${`stat-value mono`}>${fmtPct(stats?.day_win_rate)}</div>
           <${DayWinBars} calendar=${calendar} />
         </div>
-        <div class="stat-card" style=${{ display: "flex", flexDirection: "column", alignItems: "center" }}>
-          <div class="stat-label" style=${{ alignSelf: "flex-start" }}>Profit Factor</div>
+        <div class="stat-card">
+          <div class="stat-label">Profit Factor</div>
           <${Gauge} value=${stats?.profit_factor ?? null} size=${100} />
         </div>
         <${StatCard} label="Avg Win / Loss" value=${`${fmtMoney(stats?.avg_win, { decimals: 0 })} / ${fmtMoney(stats?.avg_loss, { decimals: 0 })}`} />
