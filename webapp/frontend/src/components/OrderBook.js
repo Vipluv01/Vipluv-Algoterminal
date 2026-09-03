@@ -7,7 +7,7 @@ import { fmtMoney, fmtNum } from "../format.js";
 // third number per row: "how much size is available AT OR BETTER than
 // this level," which is what a trader sizing an order against the book
 // actually needs, not just what's resting at one specific price.
-function DepthRows({ levels, side, onLevelClick }) {
+function DepthRows({ levels, side, onLevelClick, flashes }) {
   if (!levels.length) {
     return html`<div class="row" style=${{ color: "var(--text-faint)", justifyContent: "center" }}>no resting orders</div>`;
   }
@@ -18,7 +18,7 @@ function DepthRows({ levels, side, onLevelClick }) {
     return { ...l, cum: running };
   });
   const rows = withCum.map((l) => html`
-    <div key=${l.px} class=${`depth-row ${side} clickable`}
+    <div key=${l.px} class=${`depth-row ${side} clickable ${flashes && flashes.has(`${side}:${l.px}`) ? `flash-${side}` : ""}`}
          onClick=${() => onLevelClick && onLevelClick(side === "ask" ? "buy" : "sell", l.px)}
          title=${`${side === "ask" ? "Buy" : "Sell"} at ${fmtMoney(l.px)} (prefills the ticket)`}>
       <div class="depth-bar" style=${{ width: `${Math.max(6, (l.qty / maxQty) * 100)}%` }} />
@@ -28,6 +28,35 @@ function DepthRows({ levels, side, onLevelClick }) {
     </div>
   `);
   return html`<${React.Fragment}>${side === "ask" ? [...rows].reverse() : rows}<//>`;
+}
+
+// Flags price levels whose resting qty actually changed since the last tick
+// (or that are newly resting), for a brief flash highlight -- compared by
+// VALUE (a Map snapshot), not object identity, since bids/asks arrive as
+// fresh arrays every tick regardless of whether anything really moved.
+// Skips the very first tick (nothing to diff against yet), or the whole
+// book would flash once on initial load.
+function useFlashLevels(bids, asks) {
+  const prevRef = React.useRef(null);
+  const [flashes, setFlashes] = React.useState(() => new Set());
+
+  React.useEffect(() => {
+    const prev = prevRef.current;
+    prevRef.current = {
+      bid: new Map(bids.map((l) => [l.px, l.qty])),
+      ask: new Map(asks.map((l) => [l.px, l.qty])),
+    };
+    if (!prev) return;
+    const next = new Set();
+    bids.forEach((l) => { if (prev.bid.get(l.px) !== l.qty) next.add(`bid:${l.px}`); });
+    asks.forEach((l) => { if (prev.ask.get(l.px) !== l.qty) next.add(`ask:${l.px}`); });
+    if (next.size === 0) return;
+    setFlashes(next);
+    const id = setTimeout(() => setFlashes(new Set()), 550);
+    return () => clearTimeout(id);
+  }, [bids, asks]);
+
+  return flashes;
 }
 
 // Classic order-book depth chart: cumulative resting quantity as a function
@@ -100,6 +129,7 @@ export function OrderBook({ tick, stale = false, onLevelClick }) {
   const totalAskQty = asks.reduce((s, l) => s + l.qty, 0);
   const totalQty = totalBidQty + totalAskQty;
   const bidPct = totalQty > 0 ? (totalBidQty / totalQty) * 100 : 50;
+  const flashes = useFlashLevels(bids, asks);
 
   return html`
     <div class=${`panel panel-pad ${stale ? "is-stale" : ""}`}>
@@ -115,9 +145,9 @@ export function OrderBook({ tick, stale = false, onLevelClick }) {
             <div class="row" style=${{ color: "var(--text-faint)", fontSize: "10px", padding: "0 8px" }}>
               <span>Price</span><span class="mono">Qty</span><span class="mono">Cum</span>
             </div>
-            <${DepthRows} levels=${asks} side="ask" onLevelClick=${onLevelClick} />
+            <${DepthRows} levels=${asks} side="ask" onLevelClick=${onLevelClick} flashes=${flashes} />
             <div class="mid-row">${mid ? fmtMoney(mid) : "—"}</div>
-            <${DepthRows} levels=${bids} side="bid" onLevelClick=${onLevelClick} />
+            <${DepthRows} levels=${bids} side="bid" onLevelClick=${onLevelClick} flashes=${flashes} />
           <//>
         `
         : html`

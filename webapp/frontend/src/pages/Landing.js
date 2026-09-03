@@ -33,30 +33,75 @@ function fmtOps(n) {
   return n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : `${(n / 1e3).toFixed(0)}K`;
 }
 
+// Eases the DISPLAYED number toward a real value on change -- the value
+// itself never leaves THROUGHPUT_SCALING's 4 measured rows, this only
+// animates the transition between two already-real numbers when a user
+// clicks a different depth, same principle as the flash highlight in
+// OrderBook.js (decorate a real change, never invent one).
+function useCountUp(target, duration = 400) {
+  const [display, setDisplay] = React.useState(target);
+  const prevRef = React.useRef(target);
+
+  React.useEffect(() => {
+    const from = prevRef.current;
+    const to = target;
+    if (from === to) { setDisplay(to); return; }
+    let raf = null;
+    const start = performance.now();
+    function tick(now) {
+      const t = Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - t, 3);
+      setDisplay(from + (to - from) * eased);
+      if (t < 1) raf = requestAnimationFrame(tick);
+      else prevRef.current = to;
+    }
+    raf = requestAnimationFrame(tick);
+    return () => { if (raf) cancelAnimationFrame(raf); prevRef.current = to; };
+  }, [target, duration]);
+
+  return display;
+}
+
+// Each tag names the actual technique behind that feature (Engle-Granger
+// cointegration test, Kalman-filtered hedge ratio, Black-Scholes, etc.),
+// and each link goes to the real screen where it runs -- clicking one is
+// a live claim ("go see this yourself"), not a decorative pill.
 const FEATURES = [
   {
     title: "Five strategies, one engine",
     body: "Alpha (RSI+EMA), Momentum (MACD), Mean Reversion (Bollinger), and a real cointegration pairs strategy — evaluated live against bourse's own Go matching engine, not a backtest replay.",
+    tags: ["#RSI", "#MACD", "#Bollinger"],
+    link: { hash: "#/strategies", label: "View Strategies" },
   },
   {
     title: "Real cointegration, not correlation",
     body: "The pairs strategy runs an actual Engle-Granger test and a Kalman-filtered dynamic hedge ratio before ever sizing a trade — against a real matching engine, not a backtest replay with an invented Sharpe.",
+    tags: ["#EngleGranger", "#KalmanFilter"],
+    link: { hash: "#/pairs", label: "View Pairs" },
   },
   {
     title: "Kelly-sized, risk-capped",
     body: "Fractional Kelly position sizing with a hard exposure ceiling independent of the math — no single calculation is trusted to bound itself.",
+    tags: ["#FractionalKelly", "#ExposureCeiling"],
+    link: { hash: "#/risk", label: "View Risk" },
   },
   {
     title: "Options chain, real Greeks",
     body: "A synthetic index options chain priced with Black-Scholes — delta, gamma, theta, vega computed and re-marked from the live underlying, not looked up from a static table.",
+    tags: ["#BlackScholes", "#Greeks"],
+    link: { hash: "#/options", label: "View Options" },
   },
   {
     title: "Portfolio attribution, not a guess",
     body: "Brinson-style return attribution and a mark-to-market equity curve computed from actual fills — the same data the account panel shows, not a separate number invented for a chart.",
+    tags: ["#BrinsonAttribution", "#MarkToMarket"],
+    link: { hash: "#/portfolio-iq", label: "View Portfolio IQ" },
   },
   {
     title: "Live broker, human-gated",
     body: "Real order routing through Angel One's SmartAPI. Submitting a live order only ever stages it — a second, explicit confirmation is the sole path that ever reaches the broker.",
+    tags: ["#AngelOneSmartAPI", "#HumanConfirmed"],
+    link: { hash: "#/settings", label: "View Vault" },
   },
 ];
 
@@ -65,22 +110,28 @@ const MODES = [
     key: "paper",
     label: "Paper",
     body: "Fully automated, unlimited simulated capital, running against bourse's real matching engine — every strategy's default habitat.",
+    badges: ["Simulated", "Unlimited Capital", "Fully Automated"],
   },
   {
     key: "virtual",
     label: "Virtual",
     body: "A fresh ₹1,00,00,000 simulated account, same real matching engine — for sizing a strategy against a realistic starting balance before it ever sees a rupee of real capital.",
+    badges: ["Simulated", "₹1 Cr Capital", "Fully Automated"],
   },
   {
     key: "live",
     label: "Live",
     body: "Real orders through a connected broker. Unlocks only with a stored, complete broker credential, and every single order still needs an explicit human confirmation to reach it.",
+    badges: ["Real Broker", "Human-Gated", "Explicit Confirm"],
   },
 ];
 
 function BenchmarkExplorer() {
   const [i, setI] = React.useState(THROUGHPUT_SCALING.length - 1);
   const row = THROUGHPUT_SCALING[i];
+  const animOps = useCountUp(row.opsPerSec);
+  const animNs = useCountUp(row.nsPerOp);
+  const animOrders = useCountUp(row.liveOrders);
 
   return html`
     <div class="glass-panel panel-pad">
@@ -101,15 +152,15 @@ function BenchmarkExplorer() {
       <div style=${{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "12px" }}>
         <div>
           <div class="stat-label">Throughput</div>
-          <div class="stat-value mono">${fmtOps(row.opsPerSec)} ops/sec</div>
+          <div class="stat-value mono">${fmtOps(animOps)} ops/sec</div>
         </div>
         <div>
           <div class="stat-label">Cost per op</div>
-          <div class="stat-value mono">${row.nsPerOp.toFixed(1)}ns</div>
+          <div class="stat-value mono">${animNs.toFixed(1)}ns</div>
         </div>
         <div>
           <div class="stat-label">Live orders</div>
-          <div class="stat-value mono">${row.liveOrders.toLocaleString()}</div>
+          <div class="stat-value mono">${Math.round(animOrders).toLocaleString()}</div>
         </div>
       </div>
 
@@ -131,6 +182,23 @@ function BenchmarkExplorer() {
           </div>
         `)}
       </div>
+    </div>
+  `;
+}
+
+function FeatureCard({ f, expanded, onToggle }) {
+  return html`
+    <div class=${`feature-card panel panel-pad ${expanded ? "expanded" : ""}`} onClick=${onToggle}>
+      <div style=${{ fontWeight: 700, fontSize: "14px", marginBottom: "8px" }}>${f.title}</div>
+      <div style=${{ color: "var(--text-dim)", fontSize: "12.5px", lineHeight: 1.6 }}>${f.body}</div>
+      <div style=${{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "12px" }}>
+        ${f.tags.map((t) => html`<span key=${t} class="feature-tag">${t}</span>`)}
+      </div>
+      ${expanded && html`
+        <div style=${{ marginTop: "12px", paddingTop: "12px", borderTop: "1px solid var(--border)" }}>
+          <a href=${f.link.hash} class="btn btn-sm btn-ghost" onClick=${(e) => e.stopPropagation()}>${f.link.label} →</a>
+        </div>
+      `}
     </div>
   `;
 }
@@ -176,6 +244,8 @@ function useSystemStats() {
 
 export function Landing() {
   const { strategyCount } = useSystemStats();
+  const [expandedFeature, setExpandedFeature] = React.useState(null);
+  const [activeMode, setActiveMode] = React.useState("paper");
 
   return html`
     <div class="landing-page">
@@ -237,9 +307,13 @@ export function Landing() {
         </div>
         <div class="landing-modes">
           ${MODES.map((m) => html`
-            <div key=${m.key} class="panel panel-pad">
+            <div key=${m.key} class=${`mode-card panel panel-pad ${activeMode === m.key ? "active" : ""}`}
+                 onClick=${() => setActiveMode(m.key)}>
               <span class=${`badge badge-mode-${m.key}`} style=${{ marginBottom: "10px", display: "inline-block" }}>${m.label.toUpperCase()} MODE</span>
               <div style=${{ color: "var(--text-dim)", fontSize: "12.5px", lineHeight: 1.6 }}>${m.body}</div>
+              <div style=${{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "12px" }}>
+                ${m.badges.map((b) => html`<span key=${b} class="mode-badge-pill">${b}</span>`)}
+              </div>
             </div>
           `)}
         </div>
@@ -247,10 +321,9 @@ export function Landing() {
 
       <div class="landing-features">
         ${FEATURES.map((f) => html`
-          <div key=${f.title} class="panel panel-pad">
-            <div style=${{ fontWeight: 700, fontSize: "14px", marginBottom: "8px" }}>${f.title}</div>
-            <div style=${{ color: "var(--text-dim)", fontSize: "12.5px", lineHeight: 1.6 }}>${f.body}</div>
-          </div>
+          <${FeatureCard} key=${f.title} f=${f}
+            expanded=${expandedFeature === f.title}
+            onToggle=${() => setExpandedFeature((cur) => (cur === f.title ? null : f.title))} />
         `)}
       </div>
 
