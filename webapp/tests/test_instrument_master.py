@@ -39,6 +39,11 @@ FAKE_ROWS = [
     # A BSE-segment row for the SAME name -- must not count as an NSE equity listing.
     {"token": "500325", "symbol": "RELIANCE", "name": "RELIANCE", "expiry": "", "strike": "-1.000000",
      "lotsize": "1", "instrumenttype": "", "exch_seg": "BSE"},
+    # A real NSE connectivity-test security shape (confirmed live,
+    # 2026-09-04) -- otherwise indistinguishable from a genuine equity
+    # row, must still be excluded from the real tradable universe.
+    {"token": "9999", "symbol": "011NSETEST-EQ", "name": "011NSETEST", "expiry": "", "strike": "-1.000000",
+     "lotsize": "1", "instrumenttype": "", "exch_seg": "NSE"},
 ]
 
 
@@ -56,6 +61,7 @@ def _isolated_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(im, "_cache_loaded_at", None)
     monkeypatch.setattr(im, "_underlyings_sorted", None)
     monkeypatch.setattr(im, "_equity_names", None)
+    monkeypatch.setattr(im, "_equity_names_sorted", None)
     yield
 
 
@@ -100,6 +106,23 @@ def test_resolve_option_contract_returns_none_rather_than_guessing():
     assert im.resolve_option_contract("NOTREAL", "06OCT2026", 22250.0, "CE") is None
 
 
+def test_list_live_equity_names_returns_every_real_nse_eq_listing_sorted():
+    """The full real universe a live-mode symbol search should offer --
+    not this app's own 7-symbol simulated NAMED_INSTRUMENTS, and not
+    limited to underlyings that also happen to have listed options
+    (NIFTY has options here but no "-EQ" row at all, so it must be
+    absent). Also confirms the NSETEST row (below) is excluded."""
+    assert im.list_live_equity_names() == ["RELIANCE"]
+
+
+def test_list_live_equity_names_excludes_nse_connectivity_test_securities():
+    """Regression test: NSE's own test securities (e.g. "011NSETEST")
+    are real rows, shaped identically to a genuine equity listing --
+    confirmed live, 2026-09-04, 22 of them in the real file. They must
+    never surface in a live-mode symbol search."""
+    assert "011NSETEST" not in im.list_live_equity_names()
+
+
 def test_is_equity_live_tradable_true_for_a_real_nse_eq_listing():
     assert im.is_equity_live_tradable("RELIANCE") is True
 
@@ -123,6 +146,41 @@ def test_is_equity_live_tradable_ignores_a_non_nse_exchange_segment():
     # RELIANCE has both an NSE-EQ row (True) and a BSE row (must not
     # independently make some OTHER, NSE-absent name read as tradable).
     assert im.is_equity_live_tradable("RELIANCE") is True
+
+
+def test_concurrent_callers_only_parse_the_file_once(monkeypatch):
+    """Regression test for a real bug found live, 2026-09-04: right after
+    adding a higher-traffic endpoint onto this module (GET /live/market/
+    equities), CPU pinned at 228% and a single request took 40+ seconds
+    with nothing logged -- the check-then-parse in _ensure_loaded had no
+    lock, so several real concurrent requests (FastAPI runs a sync def
+    route in a threadpool) each independently re-parsed the same
+    142,867-row file at once. This fires N real threads at a cold cache
+    simultaneously and asserts the actual parse work happens exactly
+    once, not N times."""
+    import threading
+
+    real_load = im._load_from_disk
+    call_count = []
+
+    def counting_load():
+        call_count.append(1)
+        return real_load()
+
+    monkeypatch.setattr(im, "_load_from_disk", counting_load)
+
+    barrier = threading.Barrier(8)
+    def worker():
+        barrier.wait()  # maximize real overlap, not just "roughly concurrent"
+        im.list_live_equity_names()
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert call_count == [1]
 
 
 def test_refreshes_only_when_the_cached_file_is_stale(monkeypatch):

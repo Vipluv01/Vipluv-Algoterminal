@@ -7,6 +7,7 @@ import { OrderBook } from "../components/OrderBook.js";
 import { OrderEntry } from "../components/OrderEntry.js";
 import { AccountPanel } from "../components/AccountPanel.js";
 import { TimeAndSales } from "../components/TimeAndSales.js";
+import { ErrorBoundary } from "../components/ErrorBoundary.js";
 import { DEFAULT_STALE_THRESHOLD_MS, useStaleness } from "../clock.js";
 import { useMode } from "../mode.js";
 
@@ -102,6 +103,52 @@ function SymbolStatsHeader({ symbol, price, mode }) {
   `;
 }
 
+// Every real NSE equity (~2000+), not just this app's own 7-symbol
+// simulated universe -- fetched once (it's a local instrument-master
+// lookup server-side, no real Angel One call, but still no reason to
+// re-fetch on every keystroke).
+function useLiveEquityNames() {
+  const [names, setNames] = React.useState(null); // null = not loaded yet
+  React.useEffect(() => {
+    let cancelled = false;
+    api.live.equities().then((rows) => { if (!cancelled) setNames(rows); }).catch(() => { if (!cancelled) setNames([]); });
+    return () => { cancelled = true; };
+  }, []);
+  return names;
+}
+
+// Live-mode-only symbol search -- the curated SymbolTabs strip below
+// still exists (and stays the quick-access set for the 7 names this
+// app's own simulated engine also models), but live-mode trading/data
+// endpoints already accept ANY resolvable real symbol string (confirmed:
+// live_market_ws's own _connect(), get_live_history, and the live order
+// submit/confirm path never validate against NAMED_INSTRUMENTS at all --
+// the picker was the only thing actually narrower than what the backend
+// supports). Results capped at 20 -- this is a type-to-filter search
+// over ~2000 real names, not a browsable list.
+function LiveSymbolSearch({ onSelect }) {
+  const allNames = useLiveEquityNames();
+  const [query, setQuery] = React.useState("");
+  const matches = query.trim() && allNames
+    ? allNames.filter((n) => n.toUpperCase().includes(query.trim().toUpperCase())).slice(0, 20)
+    : [];
+
+  return html`
+    <div class="live-symbol-search">
+      <input class="input" type="text" value=${query} disabled=${!allNames}
+             placeholder=${allNames ? `Search any of ${allNames.length.toLocaleString()} real NSE stocks…` : "Loading real equity list…"}
+             onInput=${(e) => setQuery(e.target.value)} />
+      ${matches.length > 0 && html`
+        <div class="live-symbol-results">
+          ${matches.map((n) => html`
+            <div key=${n} class="live-symbol-result" onClick=${() => { onSelect(n); setQuery(""); }}>${n}</div>
+          `)}
+        </div>
+      `}
+    </div>
+  `;
+}
+
 function SymbolTabs({ symbols, active, onSelect, ticks }) {
   return html`
     <div style=${{ display: "flex", gap: "8px", overflowX: "auto", paddingBottom: "4px", marginBottom: "16px" }}>
@@ -152,7 +199,21 @@ export function Terminal() {
   // live), jump to the first symbol that IS -- an order form left
   // pointed at an unavailable symbol is exactly the failure this whole
   // filter exists to prevent, not just hiding it from the tab row.
+  //
+  // Skipped entirely WHILE in live mode: `active` there can be a symbol
+  // picked via LiveSymbolSearch below, which draws from the real ~2000+
+  // equity universe (GET /live/market/equities), not the curated 7-name
+  // `symbols` array this effect checks against -- a name simply not
+  // being one of those 7 doesn't mean it's invalid, and blindly
+  // rerouting away from it would undo every free-form search selection
+  // on the very next render. It's already guaranteed live-tradable by
+  // construction (the search list only ever contains real, currently-
+  // listed equities). The real risk this effect guards against --
+  // leaving `active` pointed at a symbol the CURRENT mode can't actually
+  // trade -- only applies when landing on/staying in paper or virtual,
+  // whose simulated engine only ever knows the fixed 7.
   React.useEffect(() => {
+    if (tradingMode === "live") return;
     if (!active || !visibleSymbols.length) return;
     if (!visibleSymbols.some((s) => s.symbol === active)) {
       setActive(visibleSymbols[0].symbol);
@@ -222,25 +283,37 @@ export function Terminal() {
         </div>
       </div>
 
+      ${tradingMode === "live" && html`<${LiveSymbolSearch} onSelect=${setActive} />`}
+
       <${SymbolTabs} symbols=${visibleSymbols} active=${active} onSelect=${setActive} ticks=${ticks} />
 
-      ${active && html`<${SymbolStatsHeader} symbol=${active} price=${tick?.price} mode=${tradingMode} />`}
+      ${active && html`
+        <${ErrorBoundary} label="Symbol Stats">
+          <${SymbolStatsHeader} symbol=${active} price=${tick?.price} mode=${tradingMode} />
+        <//>
+      `}
 
       ${active && html`
         <div class="terminal-grid">
           <div style=${{ display: "flex", flexDirection: "column", gap: "14px" }}>
-            <${OrderBook} tick=${tick} stale=${status !== "live"}
-                          onLevelClick=${(side, price) => setOrderPrefill({ side, price, nonce: Date.now() })} />
-            <${TimeAndSales} tick=${tick} symbol=${active} />
+            <${ErrorBoundary} label="Order Book">
+              <${OrderBook} tick=${tick} stale=${status !== "live"}
+                            onLevelClick=${(side, price) => setOrderPrefill({ side, price, nonce: Date.now() })} />
+            <//>
+            <${ErrorBoundary} label="Time & Sales"><${TimeAndSales} tick=${tick} symbol=${active} /><//>
           </div>
           <div class="panel panel-pad">
-            <${CandleChart} symbol=${active} price=${tick?.price} stale=${status !== "live"} />
+            <${ErrorBoundary} label="Chart">
+              <${CandleChart} symbol=${active} price=${tick?.price} stale=${status !== "live"} />
+            <//>
           </div>
-          <${OrderEntry} symbol=${active} price=${tick?.price} prefill=${orderPrefill}
-                         onOrderPlaced=${() => setRefreshKey((k) => k + 1)} />
+          <${ErrorBoundary} label="Order Entry">
+            <${OrderEntry} symbol=${active} price=${tick?.price} prefill=${orderPrefill}
+                           onOrderPlaced=${() => setRefreshKey((k) => k + 1)} />
+          <//>
         </div>
         <div style=${{ marginTop: "14px" }}>
-          <${AccountPanel} refreshKey=${refreshKey} />
+          <${ErrorBoundary} label="Account Panel"><${AccountPanel} refreshKey=${refreshKey} /><//>
         </div>
       `}
     </div>

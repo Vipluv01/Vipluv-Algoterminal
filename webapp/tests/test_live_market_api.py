@@ -218,3 +218,15 @@ def test_live_quotes_one_unresolvable_symbol_does_not_blank_the_others(client, m
     assert by_symbol["RELIANCE"]["ltp"] == 1430.0
     assert by_symbol["TATAMOTORS"]["ltp"] is None
     assert by_symbol["TATAMOTORS"]["close"] is None
+
+
+def test_live_equities_returns_the_full_real_universe_not_just_named_instruments(client, monkeypatch):
+    """Regression test for the real "only 7 stocks" gap: a live-mode
+    symbol picker needs the full real equity universe (app/broker/
+    instrument_master.py's own list_live_equity_names), not this app's
+    own NAMED_INSTRUMENTS -- no broker credential needed, this is a
+    local instrument-master lookup."""
+    monkeypatch.setattr("app.routers.live_market.list_live_equity_names", lambda: ["RELIANCE", "WIPRO", "ZOMATO"])
+    resp = client.get("/live/market/equities")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == ["RELIANCE", "WIPRO", "ZOMATO"]
