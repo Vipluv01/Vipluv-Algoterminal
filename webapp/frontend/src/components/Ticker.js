@@ -58,9 +58,24 @@ export function Ticker() {
     const namedSymbols = symbols.filter((s) => !s.is_derived);
 
     if (mode === "live") {
+      // Filtered to live_tradable ONLY in live mode -- confirmed live,
+      // 2026-09-03: without this, a symbol with zero real Angel One
+      // listings (TATAMOTORS) was being polled here every
+      // LIVE_TICKER_POLL_MS right alongside every other real symbol,
+      // forever, each attempt a real, guaranteed-to-fail Angel One call
+      // that still costs a full round trip through the SAME single-
+      // concurrency slot (_call_semaphore) every other live call --
+      // including options order confirmation -- has to queue behind.
+      // Six-plus hours of this in the real logs lines up exactly with a
+      // "everything in live mode feels slow" report. This was previously
+      // a deliberate exception (a read-only strip "doesn't need" the
+      // filter Terminal.js/ManualTrade.js apply to their pickers) --  but
+      // that reasoning assumed an unfiltered poll was harmless, which the
+      // real account traffic shows it isn't.
+      const liveNamedSymbols = namedSymbols.filter((s) => s.live_tradable);
       let cancelled = false;
       const poll = () => {
-        namedSymbols.forEach((s) => {
+        liveNamedSymbols.forEach((s) => {
           api.live.history(s.symbol, "1m", 1)
             .then((hist) => {
               if (cancelled) return;

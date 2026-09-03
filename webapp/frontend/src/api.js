@@ -211,6 +211,19 @@ export const api = {
   live: {
     history: (symbol, interval, limit) =>
       request("GET", `/live/market/history?symbol=${encodeURIComponent(symbol)}&interval=${interval}${limit ? `&limit=${limit}` : ""}`),
+    // Real Angel One options chain (app/routers/live_options.py) -- a
+    // completely separate universe/shape from `options` above (221 real
+    // underlyings vs. the synthetic 9-symbol chain, real bid/ask/LTP vs.
+    // a BSM theoretical price, Angel One's own expiry string format vs.
+    // an ISO date). Underlyings/expiries are local instrument-master
+    // lookups (no broker call); chain is the one that actually touches
+    // Angel One (a real, batched quote fetch).
+    options: {
+      underlyings: () => request("GET", "/live/options/underlyings"),
+      expiries: (underlying) => request("GET", `/live/options/expiries?underlying=${encodeURIComponent(underlying)}`),
+      chain: (underlying, expiry) =>
+        request("GET", `/live/options/chain?underlying=${encodeURIComponent(underlying)}&expiry=${encodeURIComponent(expiry)}`),
+    },
   },
 
   pairs: {

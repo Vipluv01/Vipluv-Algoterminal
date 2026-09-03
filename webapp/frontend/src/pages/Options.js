@@ -8,7 +8,12 @@ import { PayoffDiagram } from "../components/PayoffDiagram.js";
 import { Heatmap } from "../components/Heatmap.js";
 import { EmptyState } from "../components/EmptyState.js";
 import { ErrorBoundary } from "../components/ErrorBoundary.js";
+import { LiveOrderConfirmModal } from "../components/LiveOrderConfirmModal.js";
 import { fmtNum, px, pct, dash } from "../format.js";
+// Aliased -- this page's own local state (underlying/expiry/chain) is
+// unrelated to the real trading mode (paper/virtual/live), same reason
+// ManualTrade.js aliases it.
+import { useMode as useTradingMode } from "../mode.js";
 
 // The task this screen exists to be honest about: every OTHER fill in this
 // app is a real match from bourse's Go matching engine. Options are not --
@@ -206,6 +211,207 @@ function GreeksPanel({ reloadSignal }) {
   `;
 }
 
+// Real Angel One options: a completely separate universe from the
+// synthetic chain above (221 real underlyings, real bid/ask off Angel
+// One's own quote endpoint, Angel One's own expiry string format), so it
+// gets its own underlying/expiry/chain state rather than branching the
+// existing ChainPanel (which is built around theoretical_price/IV/OI/Vol
+// fields the real chain doesn't have). Submits through the SAME
+// POST /options/orders + LiveOrderConfirmModal path the equity/pairs
+// tickets already use (mode="live" creates a pending_confirmation row
+// with zero broker contact; confirming it is the only path that reaches
+// Angel One) -- no new confirm flow, this is that same flow's options
+// leg. GreeksPanel below is deliberately NOT reused here: GET /options/
+// greeks filters to Mode.paper orders only (app/options/greeks.py), so
+// it has nothing real to show for a live position at all.
+function LiveOptionsPanel() {
+  const [underlyings, setUnderlyings] = React.useState([]);
+  const [underlying, setUnderlyingState] = React.useState(null);
+  const [expiries, setExpiries] = React.useState([]);
+  const [expiry, setExpiry] = React.useState(null);
+  const [chain, setChain] = React.useState(null);
+  const [chainError, setChainError] = React.useState(null);
+  const [loadingChain, setLoadingChain] = React.useState(false);
+  const [ticket, setTicket] = React.useState(null); // { strike, option_type, side, symbol, lot_size, refPrice } | null
+  const [qty, setQty] = React.useState("1");
+  const [submitting, setSubmitting] = React.useState(false);
+  const [pendingOrder, setPendingOrder] = React.useState(null);
+  const toast = useToast();
+
+  React.useEffect(() => {
+    api.live.options.underlyings().then((rows) => {
+      setUnderlyings(rows);
+      setUnderlyingState((prev) => prev || rows[0] || null);
+    }).catch(() => setUnderlyings([]));
+  }, []);
+
+  React.useEffect(() => {
+    if (!underlying) return;
+    setExpiry(null);
+    api.live.options.expiries(underlying).then((rows) => {
+      setExpiries(rows);
+      setExpiry(rows[0] || null);
+    }).catch(() => setExpiries([]));
+  }, [underlying]);
+
+  // Manual refresh, not an auto-poll interval -- a live options chain can
+  // easily have 30-50+ real strikes, each a real quote-batch call; an
+  // unconditional background poll here is exactly the kind of "harmless
+  // decoration" that Ticker.js's own TATAMOTORS history shows is not
+  // actually harmless against a real, rate-limited account.
+  const loadChain = React.useCallback(() => {
+    if (!underlying || !expiry) return;
+    setLoadingChain(true);
+    setChainError(null);
+    api.live.options.chain(underlying, expiry)
+      .then(setChain)
+      .catch((e) => setChainError(e.message || "Could not load the live chain"))
+      .finally(() => setLoadingChain(false));
+  }, [underlying, expiry]);
+  React.useEffect(() => { loadChain(); }, [loadChain]);
+
+  // Click ask to buy, click bid to sell -- same convention DepthRows'
+  // own onLevelClick already uses in OrderBook.js.
+  function openTicket(row, optionType, side) {
+    const prefix = optionType === "CE" ? "call" : "put";
+    const refPrice = side === "buy" ? row[`${prefix}_ask`] : row[`${prefix}_bid`];
+    if (refPrice == null) return toast("No live quote on that side right now", "err");
+    setQty("1");
+    setTicket({
+      strike: row.strike, option_type: optionType, side,
+      symbol: row[`${prefix}_symbol`], lot_size: row.lot_size || 1, refPrice,
+    });
+  }
+
+  async function submitTicket() {
+    const qtyNum = parseInt(qty, 10);
+    if (!qtyNum || qtyNum <= 0) return toast("Enter a valid quantity (in lots)", "err");
+    setSubmitting(true);
+    try {
+      // lot_size MUST be the contract's real lot size, not the default
+      // (1) -- confirm_live_order's own option path (routers/orders.py,
+      // _resolve_and_place_option_order) computes the broker qty as
+      // order.qty * order.lot_size, converting lots to units; a wrong
+      // lot_size here would size the real order wrong at confirm time.
+      const order = await api.options.submitOrder({
+        underlying, option_type: ticket.option_type, strike: ticket.strike, expiry,
+        side: ticket.side, qty: qtyNum, lot_size: ticket.lot_size, mode: "live",
+      });
+      if (order.status === "pending_confirmation") {
+        setPendingOrder(order);
+      } else {
+        toast(`${ticket.option_type} ${ticket.strike} ${ticket.side} — ${order.execution_notice}`, "ok");
+      }
+      setTicket(null);
+    } catch (e) {
+      toast(e.message || "Order rejected", "err");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  // Colored via --bid-bright/--ask-bright (the SAME tokens OrderBook.js's
+  // own depth rows use for the identical bid/ask distinction) -- not
+  // .pos/.neg, which are --pnl-pos/--pnl-neg, a deliberately DIFFERENT
+  // hue pair reserved for P&L figures specifically so color alone never
+  // conflates a P&L number with a price. A bid/ask price here is a
+  // price, not a P&L figure.
+  const dashCell = html`<span class="mono" style=${{ color: "var(--text-faint)" }}>${dash()}</span>`;
+  const columns = [
+    {
+      key: "call_bid", label: "Bid", align: "right",
+      render: (r) => r.call_bid != null
+        ? html`<button class="btn btn-sm btn-ghost mono" style=${{ color: "var(--bid-bright)" }} onClick=${() => openTicket(r, "CE", "sell")}>${px(r.call_bid)}</button>`
+        : dashCell,
+    },
+    {
+      key: "call_ask", label: "Ask", align: "right",
+      render: (r) => r.call_ask != null
+        ? html`<button class="btn btn-sm btn-ghost mono" style=${{ color: "var(--ask-bright)" }} onClick=${() => openTicket(r, "CE", "buy")}>${px(r.call_ask)}</button>`
+        : dashCell,
+    },
+    { key: "strike", label: "Strike", render: (r) => html`<span style=${{ fontWeight: 700 }}>${fmtNum(r.strike)}</span>` },
+    {
+      key: "put_bid", label: "Bid", align: "right",
+      render: (r) => r.put_bid != null
+        ? html`<button class="btn btn-sm btn-ghost mono" style=${{ color: "var(--bid-bright)" }} onClick=${() => openTicket(r, "PE", "sell")}>${px(r.put_bid)}</button>`
+        : dashCell,
+    },
+    {
+      key: "put_ask", label: "Ask", align: "right",
+      render: (r) => r.put_ask != null
+        ? html`<button class="btn btn-sm btn-ghost mono" style=${{ color: "var(--ask-bright)" }} onClick=${() => openTicket(r, "PE", "buy")}>${px(r.put_ask)}</button>`
+        : dashCell,
+    },
+  ];
+
+  return html`
+    <${React.Fragment}>
+      <div class="notice-banner">
+        <strong>Real Angel One chain:</strong> live bid/ask off the actual instrument, not a theoretical price.
+        Bid/Ask show a dash outside NSE market hours or for an illiquid strike — that's a real absence of resting
+        depth, not a loading error, and there's no honest price to invent in its place, so nothing is clickable
+        there until a real quote exists. Submitting only ever stages the order — confirming it is the sole path
+        that reaches the broker — and quantity below is in LOTS, not units.
+      </div>
+
+      <div style=${{ display: "flex", gap: "10px", marginBottom: "16px", flexWrap: "wrap" }}>
+        <select class="input" style=${{ maxWidth: "200px", fontWeight: 700 }} value=${underlying || ""} onChange=${(e) => setUnderlyingState(e.target.value)}>
+          ${underlyings.map((u) => html`<option key=${u} value=${u}>${u}</option>`)}
+        </select>
+        <select class="input" style=${{ maxWidth: "200px" }} value=${expiry || ""} onChange=${(e) => setExpiry(e.target.value)}>
+          ${expiries.map((ex) => html`<option key=${ex} value=${ex}>${ex}</option>`)}
+        </select>
+        <button class="btn btn-sm btn-ghost" onClick=${loadChain} disabled=${loadingChain}>
+          ${loadingChain ? "Refreshing…" : "Refresh Quotes"}
+        </button>
+      </div>
+
+      <div class="panel panel-pad">
+        <div class="panel-title">Live Chain — ${underlying || "—"}</div>
+        ${!underlying || !expiry
+          ? html`<${EmptyState} message="Pick an underlying and expiry to see the real chain." />`
+          : chainError
+            ? html`
+              <div class="error-state">
+                <div><div class="error-state-title">Could not load the chain</div><div class="error-state-detail">${chainError}</div></div>
+                <button class="btn btn-sm btn-ghost" onClick=${loadChain}>Retry</button>
+              </div>
+            `
+            : chain === null
+              ? html`<div class="skeleton" style=${{ height: "320px" }} />`
+              : html`<${DataTable} columns=${columns} rows=${chain.rows} rowKey="strike" />`}
+      </div>
+
+      ${ticket && html`
+        <div class="panel panel-pad" style=${{ marginTop: "16px", maxWidth: "360px" }}>
+          <div class="panel-title">Confirm Ticket</div>
+          <div class="row hairline"><span>Contract</span><span class="mono">${ticket.symbol}</span></div>
+          <div class="row hairline"><span>${ticket.side === "buy" ? "Buy" : "Sell"}</span><span class="mono">${ticket.option_type} ${fmtNum(ticket.strike)}</span></div>
+          <div class="row hairline"><span>Reference ${ticket.side === "buy" ? "ask" : "bid"}</span><span class="mono">${px(ticket.refPrice)}</span></div>
+          <div class="row hairline"><span>Lot size</span><span class="mono">${ticket.lot_size}</span></div>
+          <div class="field" style=${{ marginTop: "10px" }}>
+            <label>Quantity (lots)</label>
+            <input class="input" type="number" min="1" value=${qty} onInput=${(e) => setQty(e.target.value)} />
+          </div>
+          <div style=${{ display: "flex", gap: "8px", marginTop: "10px" }}>
+            <button class=${`btn btn-block ${ticket.side === "buy" ? "btn-buy" : "btn-sell"}`} disabled=${submitting} onClick=${submitTicket}>
+              ${submitting ? "Submitting…" : `Stage ${ticket.side === "buy" ? "Buy" : "Sell"}`}
+            </button>
+            <button class="btn btn-ghost" onClick=${() => setTicket(null)}>Cancel</button>
+          </div>
+        </div>
+      `}
+
+      ${pendingOrder && html`
+        <${LiveOrderConfirmModal} orders=${[pendingOrder]}
+          onDone=${() => setPendingOrder(null)}
+          onClose=${() => setPendingOrder(null)} />
+      `}
+    <//>
+  `;
+}
+
 export function Options() {
   const [underlyings, setUnderlyings] = React.useState([]);
   const [underlying, setUnderlyingState] = React.useState(readStoredUnderlying);
@@ -216,6 +422,7 @@ export function Options() {
   const [chainSpot, setChainSpot] = React.useState(null);
   const [greeksReloadTick, setGreeksReloadTick] = React.useState(0);
   const toast = useToast();
+  const tradingMode = useTradingMode();
 
   React.useEffect(() => {
     api.symbols().then((rows) => setUnderlyings(rows.map((r) => r.symbol))).catch(() => setUnderlyings([]));
@@ -293,35 +500,41 @@ export function Options() {
         <div style=${{ color: "var(--text-faint)", fontSize: "12px" }}>Chain, multi-leg builder, and portfolio Greeks.</div>
       </div>
 
-      <div class="notice-banner">
-        <strong>Synthetic execution:</strong> ${PERSISTENT_NOTICE}
-      </div>
+      ${tradingMode === "live"
+        ? html`<${ErrorBoundary} label="Live Options"><${LiveOptionsPanel} /><//>`
+        : html`
+          <${React.Fragment}>
+            <div class="notice-banner">
+              <strong>Synthetic execution:</strong> ${PERSISTENT_NOTICE}
+            </div>
 
-      <div style=${{ display: "flex", gap: "10px", marginBottom: "16px", flexWrap: "wrap" }}>
-        <select class="input" style=${{ maxWidth: "180px", fontWeight: 700 }} value=${underlying || ""} onChange=${(e) => setUnderlying(e.target.value)}>
-          ${underlyings.map((u) => html`<option key=${u} value=${u}>${u}</option>`)}
-        </select>
-        <select class="input" style=${{ maxWidth: "180px" }} value=${expiry || ""} onChange=${(e) => setExpiry(e.target.value)}>
-          ${expiries.map((ex) => html`<option key=${ex.date} value=${ex.date}>${ex.label} (${ex.kind})</option>`)}
-        </select>
-      </div>
+            <div style=${{ display: "flex", gap: "10px", marginBottom: "16px", flexWrap: "wrap" }}>
+              <select class="input" style=${{ maxWidth: "180px", fontWeight: 700 }} value=${underlying || ""} onChange=${(e) => setUnderlying(e.target.value)}>
+                ${underlyings.map((u) => html`<option key=${u} value=${u}>${u}</option>`)}
+              </select>
+              <select class="input" style=${{ maxWidth: "180px" }} value=${expiry || ""} onChange=${(e) => setExpiry(e.target.value)}>
+                ${expiries.map((ex) => html`<option key=${ex.date} value=${ex.date}>${ex.label} (${ex.kind})</option>`)}
+              </select>
+            </div>
 
-      <div class="panel panel-pad" style=${{ marginBottom: "16px" }}>
-        <div class="panel-title">Chain</div>
-        <${ErrorBoundary} label="Option Chain"><${ChainPanel} underlying=${underlying} expiry=${expiry} onAddLeg=${addLeg} /><//>
-      </div>
+            <div class="panel panel-pad" style=${{ marginBottom: "16px" }}>
+              <div class="panel-title">Chain</div>
+              <${ErrorBoundary} label="Option Chain"><${ChainPanel} underlying=${underlying} expiry=${expiry} onAddLeg=${addLeg} /><//>
+            </div>
 
-      <div class="panel panel-pad" style=${{ marginBottom: "16px" }}>
-        <div class="panel-title">Position Builder</div>
-        <${ErrorBoundary} label="Position Builder">
-          <${LegBuilder} legs=${legs} spot=${chainSpot} onUpdateLeg=${updateLeg} onRemoveLeg=${removeLeg} onSubmit=${submitLegs} submitting=${submitting} />
-        <//>
-      </div>
+            <div class="panel panel-pad" style=${{ marginBottom: "16px" }}>
+              <div class="panel-title">Position Builder</div>
+              <${ErrorBoundary} label="Position Builder">
+                <${LegBuilder} legs=${legs} spot=${chainSpot} onUpdateLeg=${updateLeg} onRemoveLeg=${removeLeg} onSubmit=${submitLegs} submitting=${submitting} />
+              <//>
+            </div>
 
-      <div class="panel panel-pad">
-        <div class="panel-title">Greeks & Stress</div>
-        <${ErrorBoundary} label="Greeks"><${GreeksPanel} reloadSignal=${greeksReloadTick} /><//>
-      </div>
+            <div class="panel panel-pad">
+              <div class="panel-title">Greeks & Stress</div>
+              <${ErrorBoundary} label="Greeks"><${GreeksPanel} reloadSignal=${greeksReloadTick} /><//>
+            </div>
+          <//>
+        `}
     </div>
   `;
 }
