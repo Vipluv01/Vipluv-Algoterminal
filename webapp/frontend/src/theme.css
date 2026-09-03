@@ -86,7 +86,7 @@
 
 :root {
   /* ---- Surfaces -- each one step brighter, for real depth instead of flat panels on flat background. ---- */
-  --bg: #06080d;
+  --bg: #080c14;
   --bg-elevated: #0a0e16;
   --surface: #0e1420;
   --surface-2: #141b2a;
@@ -99,20 +99,36 @@
   --text-dim: #8892a6;
   --text-faint: #5a6478;
 
-  /* Brand accents -- teal (primary/interactive) + violet (secondary/highlight) */
+  /* Brand accents -- teal (primary/interactive) + violet (secondary/highlight).
+     Kept as the app's own established identity (logo mark, primary
+     buttons, general accents) rather than replaced -- see --cyber below
+     for the separate, ADDITIVE "active toggle" color a later pass asked
+     for; this is deliberately not a wholesale brand-color swap. */
   --accent: #2dd4bf;
   --accent-bright: #5eead4;
   --accent-dim: rgba(45, 212, 191, 0.14);
   --violet: #a78bfa;
   --violet-dim: rgba(167, 139, 250, 0.14);
+  /* "Cyber Cyan" -- a NEW, additive token for active-toggle/live-emphasis
+     states specifically (see .btn-primary-cyber, active benchmark
+     buttons), not a replacement for --accent above. Distinct enough from
+     --accent's teal to read as a genuine second signal (an active state
+     popping against the brand color), not a random extra hue. */
+  --cyber: #00e5ff;
+  --cyber-bright: #6df3ff;
+  --cyber-dim: rgba(0, 229, 255, 0.14);
 
-  /* Semantic -- order-book / buy-sell side, NOT P&L (see --pnl-pos/--pnl-neg below) */
-  --bid: #22c55e;
-  --bid-bright: #4ade80;
-  --bid-dim: rgba(34, 197, 94, 0.12);
-  --ask: #f43f5e;
-  --ask-bright: #fb7185;
-  --ask-dim: rgba(244, 63, 94, 0.12);
+  /* Semantic -- order-book / buy-sell side, NOT P&L (see --pnl-pos/--pnl-neg
+     below -- deliberately kept a DIFFERENT hue pair from these, per the
+     file-header comment; --bid/--ask below moved to a brighter emerald/
+     crimson but stayed far enough from --pnl-pos/--pnl-neg's teal-green/
+     amber-red that the two systems still don't visually collide). */
+  --bid: #00e676;
+  --bid-bright: #5cffb0;
+  --bid-dim: rgba(0, 230, 118, 0.14);
+  --ask: #ff1744;
+  --ask-bright: #ff6b8a;
+  --ask-dim: rgba(255, 23, 68, 0.14);
   --warn: #f59e0b;
 
   /* P&L semantics -- deliberately a DIFFERENT hue pair from --bid/--ask
@@ -228,13 +244,16 @@
   --accent-dim: rgba(12, 122, 112, 0.10);
   --violet: #7550c9;
   --violet-dim: rgba(117, 80, 201, 0.10);
+  --cyber: #0091a8;
+  --cyber-bright: #00707f;
+  --cyber-dim: rgba(0, 145, 168, 0.10);
 
-  --bid: #16a34a;
-  --bid-bright: #0d7a3d;
-  --bid-dim: rgba(13, 122, 61, 0.10);
-  --ask: #ea580c;
-  --ask-bright: #c2410c;
-  --ask-dim: rgba(194, 65, 12, 0.10);
+  --bid: #00994f;
+  --bid-bright: #00753d;
+  --bid-dim: rgba(0, 153, 79, 0.10);
+  --ask: #d10f34;
+  --ask-bright: #a10726;
+  --ask-dim: rgba(209, 15, 52, 0.10);
   --warn: #b45309;
 
   --pnl-pos: #0a7a58;
@@ -586,6 +605,13 @@ textarea.input { font-family: var(--font-ui); resize: vertical; min-height: 60px
 .depth-row.ask { color: var(--ask-bright); }
 .depth-row.clickable { cursor: pointer; }
 .depth-row.clickable:hover { background: var(--surface-hover); }
+/* Momentary highlight when a level's resting qty actually changed (or is
+   newly resting) -- driven by useFlashLevels' real tick-to-tick diff in
+   OrderBook.js, never a synthetic/decorative timer. */
+@keyframes flash-bid { from { background: var(--bid-dim); } to { background: transparent; } }
+@keyframes flash-ask { from { background: var(--ask-dim); } to { background: transparent; } }
+.depth-row.flash-bid { animation: flash-bid 0.55s ease-out; }
+.depth-row.flash-ask { animation: flash-ask 0.55s ease-out; }
 
 .mid-row { text-align: center; padding: 8px 0; margin: 3px 0; color: var(--accent-bright); font-weight: 700; font-family: var(--font-mono); border-top: 1px dashed var(--border); border-bottom: 1px dashed var(--border); }
 
@@ -654,7 +680,7 @@ textarea.input { font-family: var(--font-ui); resize: vertical; min-height: 60px
   padding: 3px 9px; border-radius: 999px; font-size: 10.5px; font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.04em;
 }
-.badge-live { background: var(--bid-dim); color: var(--bid-bright); border: 1px solid rgba(34,197,94,0.3); }
+.badge-live { background: var(--bid-dim); color: var(--bid-bright); border: 1px solid rgba(0,230,118,0.3); }
 .badge-off { background: var(--surface-2); color: var(--text-faint); border: 1px solid var(--border); }
 .badge-accent { background: var(--accent-dim); color: var(--accent-bright); border: 1px solid rgba(45,212,191,0.3); }
 /* Same treatment as badge-mode-live below, under a name that isn't about
@@ -857,8 +883,8 @@ textarea.input { font-family: var(--font-ui); resize: vertical; min-height: 60px
   background: var(--surface-2); color: var(--text); max-width: 340px;
   animation: slideIn .25s ease;
 }
-.toast.ok { border-color: rgba(34,197,94,0.4); }
-.toast.err { border-color: rgba(244,63,94,0.4); }
+.toast.ok { border-color: rgba(0,230,118,0.4); }
+.toast.err { border-color: rgba(255,23,68,0.4); }
 @keyframes slideIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
 
 a { color: var(--accent); text-decoration: none; }
@@ -893,16 +919,18 @@ a:hover { text-decoration: underline; }
    filter needs an ACTUAL translucent background to blur anything behind
    it (a fully opaque one blurs nothing meaningful) -- surface-2's own
    opaque value doesn't work here, hence the explicit rgba. */
-.glass-panel {
+.glass-panel, .glass-card {
   background: rgba(14, 20, 32, 0.55);
-  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
   border: 1px solid rgba(255,255,255,0.08);
-  border-radius: var(--radius);
+  border-radius: 12px;
   box-shadow: var(--shadow-card);
-  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+  transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
 }
-:root[data-theme="light"] .glass-panel { background: rgba(255,255,255,0.6); border-color: rgba(20,25,35,0.08); }
-.glass-panel:hover { border-color: rgba(45,212,191,0.35); box-shadow: var(--shadow-glow); transform: translateY(-1px); }
+:root[data-theme="light"] .glass-panel, :root[data-theme="light"] .glass-card {
+  background: rgba(255,255,255,0.6); border-color: rgba(20,25,35,0.08);
+}
+.glass-panel:hover, .glass-card:hover { border-color: rgba(45,212,191,0.35); box-shadow: var(--shadow-glow); transform: translateY(-2px); }
 
 .landing-hero {
   max-width: 780px; margin: 0 auto; padding: 90px 24px 40px; text-align: center;
@@ -925,6 +953,33 @@ a:hover { text-decoration: underline; }
 }
 .landing-modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
 .landing-proof { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+
+/* Feature cards: click toggles the expanded state that reveals a real
+   nav link (FeatureCard's f.link, in Landing.js) -- the hover glow and
+   lift are decoration on top of a genuinely functional expand/collapse,
+   not decoration standing in for one. */
+.feature-card { cursor: pointer; transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease; }
+.feature-card:hover { transform: translateY(-2px); border-color: var(--cyber-dim); box-shadow: 0 0 0 1px var(--cyber-dim), var(--shadow-card); }
+.feature-card.expanded { border-color: var(--cyber); box-shadow: 0 0 0 1px var(--cyber-dim), 0 0 28px var(--cyber-dim); }
+.feature-tag {
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600;
+  padding: 3px 8px; border-radius: 999px;
+  color: var(--cyber-bright); background: var(--cyber-dim); border: 1px solid var(--cyber-dim);
+}
+
+/* Mode cards: click sets which mode is "active" for display purposes only
+   -- this is landing-page UI state, NOT the real trading mode switch
+   (that lives in ModeSwitcher.js, gated behind live-credential checks and
+   only reachable once inside the app). Badges are the same real claims
+   already in each mode's body text, just surfaced as pills. */
+.mode-card { cursor: pointer; transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease; }
+.mode-card:hover { transform: translateY(-2px); }
+.mode-card.active { border-color: var(--cyber); box-shadow: 0 0 0 1px var(--cyber-dim), 0 0 28px var(--cyber-dim); }
+.mode-badge-pill {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+  padding: 3px 8px; border-radius: 999px;
+  color: var(--text-dim); background: var(--surface-2); border: 1px solid var(--border);
+}
 
 @media (max-width: 900px) {
   .landing-title { font-size: 30px; }
