@@ -12,6 +12,8 @@ hardcode.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -71,10 +73,10 @@ class AttributionOut(BaseModel):
 
 
 def _portfolio_weights_and_returns(
-    db: Session, user: User, registry: MarketRegistry,
+    db: Session, user: User, registry: MarketRegistry, mode: Mode,
 ) -> tuple[dict[str, float], dict[str, float], float, str | None]:
     prices = {**registry.current_prices(), **mark_option_positions(db, user.id, registry)}
-    orders = db.query(Order).filter(Order.user_id == user.id, Order.mode == Mode.paper).all()
+    orders = db.query(Order).filter(Order.user_id == user.id, Order.mode == mode).all()
     snapshot = compute_account(orders, prices, only_primary=True)
 
     if snapshot.total_value <= 0:
@@ -110,11 +112,25 @@ def _benchmark_returns(registry: MarketRegistry) -> dict[str, float]:
 
 @router.get("/attribution", response_model=AttributionOut)
 def get_attribution(
+    # "live" is deliberately NOT a valid value here -- there is no real
+    # mark-to-market registry, option-position marking, or benchmark
+    # price source for live positions yet (this whole computation reads
+    # off the SIMULATED engine's registry/current_prices, which never
+    # sees a real Angel One price at all). Real bug this closes
+    # (confirmed live, 2026-09-03): this endpoint had NO mode parameter
+    # at all before, always querying Mode.paper regardless of which mode
+    # was actually selected -- Portfolio IQ silently showed paper's
+    # accumulated attribution/P&L under live mode, mislabeled as if it
+    # applied there. The frontend now only ever calls this for paper/
+    # virtual and shows an honest "not available in live mode yet" state
+    # itself for live -- the same pattern AccountPanel.js already
+    # established for GET /account's own paper-only scope.
+    mode: Literal["paper", "virtual"] = "paper",
     registry: MarketRegistry = Depends(get_registry),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    weights, returns, total_value, reason = _portfolio_weights_and_returns(db, user, registry)
+    weights, returns, total_value, reason = _portfolio_weights_and_returns(db, user, registry, Mode(mode))
     if reason is not None:
         return AttributionOut(
             benchmark_name=BENCHMARK_NAME, benchmark_symbols=list(BENCHMARK_SYMBOLS),
@@ -150,13 +166,17 @@ class RealizedPnlPointOut(BaseModel):
 
 
 @router.get("/realized-pnl-curve", response_model=list[RealizedPnlPointOut])
-def get_portfolio_realized_pnl_curve(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_portfolio_realized_pnl_curve(
+    mode: Literal["paper", "virtual"] = "paper",  # see get_attribution's own docstring on why "live" isn't valid here
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     # Same only_primary scoping as GET /account/equity-curve -- the
     # realized (fill-indexed) walk, not mark-to-market; see
     # accounting.compute_realized_pnl_curve's own docstring.
     orders = (
         db.query(Order)
-        .filter(Order.user_id == user.id, Order.mode == Mode.paper, Order.sub_account_id.is_(None))
+        .filter(Order.user_id == user.id, Order.mode == Mode(mode), Order.sub_account_id.is_(None))
         .all()
     )
     return compute_realized_pnl_curve(orders)
