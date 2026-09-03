@@ -182,14 +182,43 @@ def healthz():
 
 @app.get("/symbols")
 def list_symbols():
+    from app.broker.instrument_master import is_equity_live_tradable
     from app.markets import DERIVED_INDICES, NAMED_INSTRUMENTS, compute_derived_index
-    symbols = [{"symbol": s, "reference_price": p, "is_derived": False} for s, p in NAMED_INSTRUMENTS.items()]
+
+    # live_tradable: whether Angel One's OWN current instrument master
+    # lists a real NSE equity for this symbol right now -- a real,
+    # confirmed gap this closes (2026-09-03): TATAMOTORS is a valid
+    # simulated symbol (paper/virtual mode has always traded it fine)
+    # but has ZERO real listings under any name, almost certainly the
+    # real corporate demerger. Without this, live mode's symbol picker
+    # offered a ticker the real broker would reject on confirm -- this
+    # is what lets the frontend filter that out BEFORE a user hits it,
+    # not just after. Wrapped in try/except: the instrument master's own
+    # download can fail (network, Angel One's file being unavailable) and
+    # that must never take down the whole /symbols endpoint every OTHER
+    # mode depends on -- a live_tradable that can't be determined defaults
+    # to False (the safe direction: hide a symbol rather than risk
+    # offering one that turns out unavailable).
+    def _live_tradable(symbol: str) -> bool:
+        try:
+            return is_equity_live_tradable(symbol)
+        except Exception:
+            return False
+
+    symbols = [
+        {"symbol": s, "reference_price": p, "is_derived": False, "live_tradable": _live_tradable(s)}
+        for s, p in NAMED_INSTRUMENTS.items()
+    ]
     # reference_price for a derived index is computed from the SAME static
     # NAMED_INSTRUMENTS reference prices its constituents use above --
     # illustrative, not a live quote, same convention as every other
-    # reference_price this endpoint already returns.
+    # reference_price this endpoint already returns. Never live_tradable:
+    # NIFTY50/BANKNIFTY here are this app's own simulated weighted
+    # baskets, not a single real equity instrument live mode could ever
+    # place an equity order against.
     symbols.extend(
-        {"symbol": s, "reference_price": compute_derived_index(s, NAMED_INSTRUMENTS), "is_derived": True}
+        {"symbol": s, "reference_price": compute_derived_index(s, NAMED_INSTRUMENTS),
+         "is_derived": True, "live_tradable": False}
         for s in DERIVED_INDICES
     )
     return symbols

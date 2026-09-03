@@ -73,6 +73,13 @@ class OptionContract:
 _cache: dict[str, list[OptionContract]] | None = None  # underlying -> its contracts
 _cache_loaded_at: float | None = None
 _underlyings_sorted: list[str] | None = None
+# NSE equity names Angel One's own instrument master currently lists a
+# real "{NAME}-EQ" tradingsymbol for -- see is_equity_live_tradable's own
+# docstring on why this exists (a real, confirmed gap: TATAMOTORS has
+# ZERO matches anywhere in this file, not just among options -- the
+# ticker isn't currently listed under any instrument type at all,
+# almost certainly the real corporate demerger, not a bug).
+_equity_names: set[str] | None = None
 
 
 def _fetch_and_cache() -> None:
@@ -87,42 +94,53 @@ def _fetch_and_cache() -> None:
     CACHE_PATH.write_bytes(response.content)
 
 
-def _load_from_disk() -> dict[str, list[OptionContract]]:
+def _load_from_disk() -> tuple[dict[str, list[OptionContract]], set[str]]:
     with CACHE_PATH.open() as f:
         raw = json.load(f)
 
     by_underlying: dict[str, list[OptionContract]] = {}
+    equity_names: set[str] = set()
+    # One pass over all 142,867 rows builds BOTH indices -- re-reading
+    # the same 33MB file twice for two different lookups would be pure
+    # waste when every row is already being visited once here anyway.
     for row in raw:
-        if row.get("instrumenttype") not in _OPTION_INSTRUMENT_TYPES:
-            continue
-        underlying = row.get("name")
-        if not underlying:
-            continue
-        try:
-            contract = OptionContract(
-                token=row["token"],
-                tradingsymbol=row["symbol"],
-                underlying=underlying,
-                expiry=row["expiry"],
-                strike=float(row["strike"]) / 100.0,
-                option_type="CE" if row["symbol"].endswith("CE") else "PE",
-                lot_size=int(row["lotsize"]),
-                exchange_segment=row.get("exch_seg", "NFO"),
-            )
-        except (KeyError, ValueError):
-            # A row shaped differently than every other one confirmed
-            # live -- skip it rather than let one malformed entry crash
-            # the whole chain feature; this is discovery data, not an
-            # order, so silently dropping one unusable row is the right
-            # failure mode here (unlike anywhere real money is involved).
-            continue
-        by_underlying.setdefault(underlying, []).append(contract)
+        instrument_type = row.get("instrumenttype")
+        if instrument_type in _OPTION_INSTRUMENT_TYPES:
+            underlying = row.get("name")
+            if not underlying:
+                continue
+            try:
+                contract = OptionContract(
+                    token=row["token"],
+                    tradingsymbol=row["symbol"],
+                    underlying=underlying,
+                    expiry=row["expiry"],
+                    strike=float(row["strike"]) / 100.0,
+                    option_type="CE" if row["symbol"].endswith("CE") else "PE",
+                    lot_size=int(row["lotsize"]),
+                    exchange_segment=row.get("exch_seg", "NFO"),
+                )
+            except (KeyError, ValueError):
+                # A row shaped differently than every other one confirmed
+                # live -- skip it rather than let one malformed entry crash
+                # the whole chain feature; this is discovery data, not an
+                # order, so silently dropping one unusable row is the right
+                # failure mode here (unlike anywhere real money is involved).
+                continue
+            by_underlying.setdefault(underlying, []).append(contract)
+        elif instrument_type == "" and row.get("exch_seg") == "NSE" and str(row.get("symbol", "")).endswith("-EQ"):
+            # Confirmed live shape for a real NSE equity listing (e.g.
+            # RELIANCE-EQ) -- plain equities carry an EMPTY instrumenttype
+            # string, not a named one the way options do.
+            name = row.get("name")
+            if name:
+                equity_names.add(name)
 
-    return by_underlying
+    return by_underlying, equity_names
 
 
 def _ensure_loaded(force_refresh: bool = False) -> None:
-    global _cache, _cache_loaded_at, _underlyings_sorted
+    global _cache, _cache_loaded_at, _underlyings_sorted, _equity_names
 
     needs_download = force_refresh or not CACHE_PATH.exists()
     if not needs_download:
@@ -134,7 +152,7 @@ def _ensure_loaded(force_refresh: bool = False) -> None:
         _cache = None  # force a re-parse below even if this process already had an in-memory copy
 
     if _cache is None:
-        _cache = _load_from_disk()
+        _cache, _equity_names = _load_from_disk()
         _cache_loaded_at = time.time()
         _underlyings_sorted = sorted(_cache.keys())
         log.info(
@@ -147,6 +165,24 @@ def list_option_underlyings() -> list[str]:
     _ensure_loaded()
     assert _underlyings_sorted is not None
     return _underlyings_sorted
+
+
+def is_equity_live_tradable(name: str) -> bool:
+    """Whether Angel One's OWN current instrument master lists a real
+    "{name}-EQ" NSE equity for this ticker right now -- a real, confirmed
+    gap this exists to catch: TATAMOTORS (2026-09-03) has ZERO matches
+    anywhere in the real file, under any instrument type, almost
+    certainly the real corporate demerger rather than a bug. This app's
+    own NAMED_INSTRUMENTS (app/markets.py) is a fixed, simulated symbol
+    list that paper/virtual mode has no reason to ever change -- but live
+    mode routes real orders through the real exchange, so offering a
+    symbol the real exchange doesn't currently list sets a user up to
+    hit exactly this failure. Callers filtering a live-mode symbol picker
+    should call this per NAMED_INSTRUMENTS symbol, not assume every
+    simulated symbol is also a real one."""
+    _ensure_loaded()
+    assert _equity_names is not None
+    return name in _equity_names
 
 
 def list_expiries(underlying: str) -> list[str]:
