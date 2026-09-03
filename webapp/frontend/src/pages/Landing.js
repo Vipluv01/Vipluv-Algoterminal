@@ -102,7 +102,7 @@ function ComparisonSection() {
       <div class="comparison-row comparison-header">
         <div>Dimension</div>
         <div>Traditional Platforms &amp; Backtesters</div>
-        <div>AlgoTerminal (Bourse Core)</div>
+        <div>VS Algoterminal (Bourse Core)</div>
       </div>
       ${COMPARISON.map((row) => html`
         <div key=${row.dimension} class="comparison-row">
@@ -455,7 +455,7 @@ export function Landing() {
       <div class="landing-glow" />
       <nav class="topnav" style=${{ background: "transparent", backdropFilter: "none", borderBottom: "1px solid var(--border)" }}>
         <a href="#/" class="brand" style=${{ textDecoration: "none" }}>
-          <span class="brand-mark">A</span><span>algoterminal</span>
+          <span class="brand-mark">A</span><span>VS Algoterminal</span>
         </a>
         <div style=${{ flex: 1 }} />
         <a href="#/terminal" class="btn btn-primary">Launch Terminal</a>
@@ -542,7 +542,7 @@ export function Landing() {
 
       <div class="landing-container landing-section">
         <span class="section-kicker">[ COMPARISON ]</span>
-        <div style=${{ fontWeight: 700, fontSize: "16px", marginBottom: "4px" }}>Why AlgoTerminal / Bourse Core?</div>
+        <div style=${{ fontWeight: 700, fontSize: "16px", marginBottom: "4px" }}>Why VS Algoterminal / Bourse Core?</div>
         <div style=${{ color: "var(--text-faint)", fontSize: "12.5px", marginBottom: "18px" }}>
           Every claim on the right maps to a fact already shown elsewhere on this page or in the repo README —
           not a new number invented for this table.
