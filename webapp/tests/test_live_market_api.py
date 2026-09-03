@@ -5,6 +5,8 @@ docstring)."""
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from app.broker.angelone import AngelOneAuthError, AngelOneError
 
 
@@ -109,6 +111,28 @@ def test_live_history_never_takes_the_first_match_when_it_is_not_the_equity_seri
     resp = client.get("/live/market/history", params={"symbol": "SBIN"})
     assert resp.status_code == 200, resp.text
     assert stub.last_candle_params["symboltoken"] == SBIN_EQ_TOKEN
+
+
+def test_live_history_widens_the_lookback_window_so_it_survives_a_closed_market(client, monkeypatch):
+    """Regression test for a real bug found live against the real account,
+    2026-09-03 21:12 IST: `from_dt = now() - (limit * interval)` alone is
+    anchored to WALL-CLOCK now(), not the market's actual last trading
+    session. At the default 1m/300-bar chart load, that's a 5-hour
+    lookback -- once NSE has been closed a few hours past 15:30, the
+    ENTIRE window falls in dead time and Angel One's real candle API
+    (which only returns bars for minutes that actually traded, confirmed
+    by that same live call returning zero) hands back nothing, so the
+    chart renders empty. The fix floors the lookback at 10 calendar days
+    regardless of the natural `limit * interval` span or what time it is
+    right now -- this asserts that floor directly rather than depending
+    on the test happening to run outside market hours itself."""
+    stub = _StubAdapter()
+    monkeypatch.setattr("app.routers.live_market.get_adapter_for_user", lambda db, user_id: stub)
+
+    resp = client.get("/live/market/history", params={"symbol": "RELIANCE", "interval": "1m", "limit": 300})
+    assert resp.status_code == 200, resp.text
+    span = stub.last_candle_params["to_dt"] - stub.last_candle_params["from_dt"]
+    assert span >= timedelta(days=10)
 
 
 def test_live_history_respects_the_limit_ceiling(client):

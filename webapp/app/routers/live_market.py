@@ -118,7 +118,19 @@ def get_live_history(
     symboltoken = _resolve_symboltoken(adapter, symbol)
 
     to_dt = datetime.now()
-    from_dt = to_dt - timedelta(seconds=INTERVAL_SECONDS[interval] * limit)
+    # `limit * interval` alone is anchored to WALL-CLOCK now(), not to the
+    # market's actual last trading session -- confirmed live, 2026-09-03
+    # 21:12 IST: a 1m/300-bar request (a 5-hour natural lookback) against a
+    # real, actively-traded symbol (ICICIBANK) returned ZERO bars, because
+    # NSE closed at 15:30 and the entire 5-hour window fell after that.
+    # Angel One's candle API only returns bars for minutes that actually
+    # traded (confirmed by that same empty response, not padded with
+    # closed-market filler), so widening the request window is safe --
+    # it can only pick up MORE real bars, never fabricate any -- and the
+    # `[-limit:]` slice below still caps the response at what was asked
+    # for. 10 calendar days floors even an extended holiday weekend.
+    lookback = max(timedelta(seconds=INTERVAL_SECONDS[interval] * limit), timedelta(days=10))
+    from_dt = to_dt - lookback
     try:
         raw_bars = adapter.get_historical_candles(
             exchange="NSE", symboltoken=symboltoken, interval=interval, from_dt=from_dt, to_dt=to_dt,
