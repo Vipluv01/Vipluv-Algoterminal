@@ -99,7 +99,7 @@ function SingleTicket({ symbols, symbol, setSymbol, price, prefillSide }) {
       <div class="field">
         <label>Symbol</label>
         <select class="input" value=${symbol} onChange=${(e) => setSymbol(e.target.value)}>
-          ${symbols.map((s) => html`<option key=${s.symbol} value=${s.symbol}>${s.symbol}</option>`)}
+          ${visibleSymbols.map((s) => html`<option key=${s.symbol} value=${s.symbol}>${s.symbol}</option>`)}
         </select>
       </div>
 
@@ -301,6 +301,19 @@ export function ManualTrade() {
       if (rows.length) setSymbol(rows[0].symbol);
     });
   }, []);
+
+  // Same real gap Terminal.js's own comment documents (confirmed live,
+  // 2026-09-03: TATAMOTORS has zero real Angel One listings, almost
+  // certainly the corporate demerger) -- this ticket's own symbol
+  // picker needs the same live-mode filter, not just Terminal's.
+  const visibleSymbols = tradingMode === "live" ? symbols.filter((s) => s.live_tradable) : symbols;
+  React.useEffect(() => {
+    if (!symbol || !visibleSymbols.length) return;
+    if (!visibleSymbols.some((s) => s.symbol === symbol)) {
+      setSymbol(visibleSymbols[0].symbol);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tradingMode, symbols]);
 
   React.useEffect(() => {
     if (mode !== "single" || !symbol) return;

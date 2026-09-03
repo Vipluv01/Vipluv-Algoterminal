@@ -33,6 +33,12 @@ FAKE_ROWS = [
     # A malformed row (strike isn't a real number) -- must be skipped, not crash the whole load.
     {"token": "999", "symbol": "BROKEN", "name": "BROKEN", "expiry": "01JAN2027",
      "strike": "not-a-number", "lotsize": "1", "instrumenttype": "OPTSTK", "exch_seg": "NFO"},
+    # A real plain-equity row shape (confirmed live) -- empty instrumenttype, NSE segment, "-EQ" suffix.
+    {"token": "2885", "symbol": "RELIANCE-EQ", "name": "RELIANCE", "expiry": "", "strike": "-1.000000",
+     "lotsize": "1", "instrumenttype": "", "exch_seg": "NSE"},
+    # A BSE-segment row for the SAME name -- must not count as an NSE equity listing.
+    {"token": "500325", "symbol": "RELIANCE", "name": "RELIANCE", "expiry": "", "strike": "-1.000000",
+     "lotsize": "1", "instrumenttype": "", "exch_seg": "BSE"},
 ]
 
 
@@ -49,6 +55,7 @@ def _isolated_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(im, "_cache", None)
     monkeypatch.setattr(im, "_cache_loaded_at", None)
     monkeypatch.setattr(im, "_underlyings_sorted", None)
+    monkeypatch.setattr(im, "_equity_names", None)
     yield
 
 
@@ -91,6 +98,31 @@ def test_resolve_option_contract_returns_none_rather_than_guessing():
     assert im.resolve_option_contract("NIFTY", "06OCT2026", 99999.0, "CE") is None
     assert im.resolve_option_contract("NIFTY", "06OCT2026", 22250.0, "PE") is not None
     assert im.resolve_option_contract("NOTREAL", "06OCT2026", 22250.0, "CE") is None
+
+
+def test_is_equity_live_tradable_true_for_a_real_nse_eq_listing():
+    assert im.is_equity_live_tradable("RELIANCE") is True
+
+
+def test_is_equity_live_tradable_false_for_a_name_with_no_nse_eq_listing():
+    """The real, confirmed gap this function exists for: TATAMOTORS
+    (2026-09-03) has zero matches anywhere in Angel One's own real
+    instrument master -- almost certainly the real corporate demerger,
+    not a bug. NIFTY has real OPTION listings in the fixture but no
+    "-EQ" row (indices aren't equities), which must also read as False,
+    not accidentally True from the option-side data being present."""
+    assert im.is_equity_live_tradable("TATAMOTORS") is False
+    assert im.is_equity_live_tradable("NIFTY") is False
+
+
+def test_is_equity_live_tradable_ignores_a_non_nse_exchange_segment():
+    """A BSE-only listing under the same name must not count -- this
+    app's live equity orders route through NSE specifically (see
+    resolve_equity_symbol's own exchange check), so availability has to
+    mean available on THAT exchange, not "listed somewhere."""
+    # RELIANCE has both an NSE-EQ row (True) and a BSE row (must not
+    # independently make some OTHER, NSE-absent name read as tradable).
+    assert im.is_equity_live_tradable("RELIANCE") is True
 
 
 def test_refreshes_only_when_the_cached_file_is_stale(monkeypatch):

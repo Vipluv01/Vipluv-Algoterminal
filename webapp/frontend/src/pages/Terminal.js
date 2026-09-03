@@ -48,6 +48,28 @@ export function Terminal() {
     });
   }, []);
 
+  // live_tradable (app/main.py's /symbols, backed by Angel One's own
+  // real instrument master) -- a symbol this app has always simulated
+  // fine in paper/virtual mode is not guaranteed to be one the REAL
+  // broker currently lists (confirmed live, 2026-09-03: TATAMOTORS has
+  // zero real listings, almost certainly the real corporate demerger --
+  // a user hit exactly this trying to place a live order on it). Only
+  // filters in live mode -- paper/virtual never cared and still don't.
+  const visibleSymbols = tradingMode === "live" ? symbols.filter((s) => s.live_tradable) : symbols;
+
+  // If the currently active symbol isn't tradable in the mode just
+  // switched to (e.g. sitting on TATAMOTORS in paper, then flipping to
+  // live), jump to the first symbol that IS -- an order form left
+  // pointed at an unavailable symbol is exactly the failure this whole
+  // filter exists to prevent, not just hiding it from the tab row.
+  React.useEffect(() => {
+    if (!active || !visibleSymbols.length) return;
+    if (!visibleSymbols.some((s) => s.symbol === active)) {
+      setActive(visibleSymbols[0].symbol);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tradingMode, symbols]);
+
   React.useEffect(() => {
     if (!active) return;
     setWsStatus("connecting");
@@ -99,7 +121,7 @@ export function Terminal() {
         </div>
       </div>
 
-      <${SymbolTabs} symbols=${symbols} active=${active} onSelect=${setActive} ticks=${ticks} />
+      <${SymbolTabs} symbols=${visibleSymbols} active=${active} onSelect=${setActive} ticks=${ticks} />
 
       ${active && html`
         <div class="terminal-grid">
