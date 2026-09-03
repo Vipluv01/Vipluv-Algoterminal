@@ -1,10 +1,46 @@
 import React from "react";
 import { html } from "../html.js";
 import { api } from "../api.js";
+import { fmtMoney } from "../format.js";
 import { useToast } from "../toast.js";
 import { OrderModeBanner } from "./OrderModeBanner.js";
 import { LiveOrderConfirmModal } from "./LiveOrderConfirmModal.js";
 import { useMode } from "../mode.js";
+
+const QUICK_PCTS = [25, 50, 75, 100];
+
+// Real available cash, mode-aware -- paper/virtual only. Live has no
+// account-snapshot endpoint yet (same honest gap AccountPanel.js/
+// Accounts.js already carve out for it), so the quick-% row below is
+// simply not offered there rather than computed against a number this
+// app doesn't actually have for a live account.
+function useAvailableCash(mode) {
+  const [cash, setCash] = React.useState(null);
+  React.useEffect(() => {
+    setCash(null);
+    if (mode === "live") return;
+    let cancelled = false;
+    const fetchAccount = mode === "virtual" ? api.virtual.account : api.account;
+    fetchAccount().then((acc) => { if (!cancelled) setCash(acc?.cash ?? null); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [mode]);
+  return cash;
+}
+
+// GET /telemetry/latency -- the SAME real, already-measured aggregate
+// StatusBar.js's own connection indicator already surfaces (an aggregate
+// over recent order submits, n_samples/p50_ms/p99_ms or null before the
+// first real submit) -- not a per-order estimate invented for this
+// preview.
+function useExecutionLatency() {
+  const [latency, setLatency] = React.useState(undefined);
+  React.useEffect(() => {
+    let cancelled = false;
+    api.telemetry.latency().then((v) => { if (!cancelled) setLatency(v); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  return latency;
+}
 
 // prefill: {side, price, nonce} | undefined -- click-to-trade support.
 // `nonce` (a fresh value, e.g. Date.now(), on every click) is what makes a
@@ -27,6 +63,20 @@ export function OrderEntry({ symbol, price, onOrderPlaced, prefill }) {
   const toast = useToast();
   const tradingMode = useMode();
   const isLive = tradingMode === "live";
+  const availableCash = useAvailableCash(tradingMode);
+  const executionLatency = useExecutionLatency();
+
+  // The reference price a quick-% button or the preview below sizes
+  // against -- the order's own limit price once one's been typed,
+  // otherwise the live market price. Neither is a placeholder: both are
+  // real numbers already available to this form.
+  const refPrice = orderType === "limit" && Number(px) > 0 ? Number(px) : price;
+
+  function applyQuickPct(pct) {
+    if (!availableCash || !refPrice) return;
+    const qtyNum = Math.max(1, Math.floor((availableCash * (pct / 100)) / refPrice));
+    setQty(String(qtyNum));
+  }
 
   // Track the live price by default, same UX as the bourse demo's own
   // order form -- but never fight a visitor who's actively typing.
@@ -106,6 +156,15 @@ export function OrderEntry({ symbol, price, onOrderPlaced, prefill }) {
         <input class="input" type="number" min="1" value=${qty} onInput=${(e) => setQty(e.target.value)} />
       </div>
 
+      ${!isLive && html`
+        <div class="quick-pct-row" title=${availableCash == null ? "Loading available cash…" : undefined}>
+          ${QUICK_PCTS.map((pct) => html`
+            <button key=${pct} class="btn btn-sm btn-ghost" disabled=${!availableCash || !refPrice}
+                    onClick=${() => applyQuickPct(pct)}>${pct}%</button>
+          `)}
+        </div>
+      `}
+
       ${orderType === "limit" && html`
         <div class="field">
           <label>Price (₹)</label>
@@ -134,6 +193,17 @@ export function OrderEntry({ symbol, price, onOrderPlaced, prefill }) {
           </div>
         <//>
       `}
+
+      <div class="order-preview">
+        <div class="order-preview-row">
+          <span>Est. order value ${isLive ? "" : "/ margin (cash account)"}</span>
+          <span class="mono">${refPrice && Number(qty) ? fmtMoney(refPrice * Number(qty)) : "—"}</span>
+        </div>
+        <div class="order-preview-row">
+          <span>Est. execution latency (p50)</span>
+          <span class="mono">${executionLatency === undefined ? "…" : executionLatency ? `${executionLatency.p50_ms.toFixed(2)}ms` : "—"}</span>
+        </div>
+      </div>
 
       <button class=${`btn btn-block ${side === "buy" ? "btn-buy" : "btn-sell"}`} disabled=${submitting} onClick=${submit}>
         ${submitting ? "Submitting…" : `Submit ${side === "buy" ? "Buy" : "Sell"}`}
