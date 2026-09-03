@@ -563,6 +563,10 @@ textarea.input { font-family: var(--font-ui); resize: vertical; min-height: 60px
   align-items: center; min-height: var(--row-h); padding: 6px 0; font-size: var(--font-data);
 }
 .table-row span:not(:first-child) { text-align: right; }
+/* Positions table only -- a 5th column (Close) alongside the shared
+   4-column .table-row every other AccountPanel tab (Open Orders,
+   Brackets, All Orders) still uses as-is. */
+.table-row.positions-row { grid-template-columns: 2fr 1fr 1fr 1.5fr 0.9fr; }
 
 /* DataTable primitive (components/DataTable.js) -- N columns via a grid
    template computed from the `columns` prop at render time, unlike
@@ -603,8 +607,10 @@ textarea.input { font-family: var(--font-ui); resize: vertical; min-height: 60px
 .depth-row.ask .depth-bar { background: var(--ask); }
 .depth-row.bid { color: var(--bid-bright); }
 .depth-row.ask { color: var(--ask-bright); }
-.depth-row.clickable { cursor: pointer; }
+.depth-row.clickable { cursor: pointer; transition: background 0.12s ease; }
 .depth-row.clickable:hover { background: var(--surface-hover); }
+.depth-row.clickable.bid:hover { box-shadow: inset 2px 0 0 var(--bid); }
+.depth-row.clickable.ask:hover { box-shadow: inset 2px 0 0 var(--ask); }
 /* Momentary highlight when a level's resting qty actually changed (or is
    newly resting) -- driven by useFlashLevels' real tick-to-tick diff in
    OrderBook.js, never a synthetic/decorative timer. */
@@ -622,7 +628,20 @@ textarea.input { font-family: var(--font-ui); resize: vertical; min-height: 60px
 .candle-toolbar {
   display: flex; align-items: center; gap: 6px; padding-bottom: 8px;
 }
-.candle-timeframes { max-width: 220px; }
+.candle-timeframes { max-width: 220px; padding-right: 10px; border-right: 1px solid var(--border); }
+
+/* Real O/H/L/C of the candle currently forming (or last finalized),
+   overlaid on the chart -- CandleChart.js's own useCandleAggregator
+   state, not a separate klinecharts tooltip config this component
+   can't fully verify the schema of. */
+.candle-ohlc-legend {
+  position: absolute; top: 8px; left: 8px; z-index: 2;
+  display: flex; gap: 12px; padding: 5px 10px;
+  background: rgba(14, 20, 32, 0.72); backdrop-filter: blur(6px);
+  border: 1px solid var(--border); border-radius: 6px;
+  font-size: 11px; color: var(--text-faint); pointer-events: none;
+}
+:root[data-theme="light"] .candle-ohlc-legend { background: rgba(255,255,255,0.72); }
 .indicator-picker-backdrop {
   position: fixed; inset: 0; z-index: 200;
   background: var(--scrim-modal); backdrop-filter: blur(2px);
@@ -890,7 +909,67 @@ textarea.input { font-family: var(--font-ui); resize: vertical; min-height: 60px
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
-.terminal-grid { display: grid; grid-template-columns: 260px 1fr 300px; gap: 14px; align-items: start; }
+.terminal-grid { display: grid; grid-template-columns: 280px 1fr 320px; gap: 12px; align-items: stretch; }
+
+/* Symbol stats header: real 24h change/high/low/volume, computed from
+   actual bars/quotes (Terminal.js's own useSymbolStats), never a
+   fabricated figure sitting next to the real price. */
+.symbol-stats-header {
+  display: flex; align-items: center; gap: 28px; flex-wrap: wrap;
+  padding: 12px 16px; margin-bottom: 14px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.symbol-stats-header .stat-label { margin-bottom: 3px; }
+.symbol-stats-header .stat-value { font-size: 15px; }
+
+/* Chart toolbar "neon" active state -- a distinct treatment from the
+   buy/sell/neutral toggle-row states above, reserved for the chart's own
+   timeframe/view controls specifically. Uses --cyber, the same
+   interactive-accent token already established for toggles elsewhere. */
+.btn.active.neon { background: var(--cyber-dim); color: var(--cyber-bright); border-color: var(--cyber); box-shadow: 0 0 10px var(--cyber-dim); }
+
+/* Status pill: dot pulse already existed (.status-dot.live); this adds a
+   hover affordance so the staleness tooltip (a real title= attribute,
+   Terminal.js) reads as interactive. */
+.status-pill { cursor: default; }
+.status-pill[title] { cursor: help; }
+
+/* P&L badge pill -- AccountPanel's positions table, replacing a plain
+   mono color with a colored pill carrying both the absolute figure and
+   the real % return (unrealized_pnl / cost_basis), computed from data
+   already on the position, not a new number invented for the pill. */
+.pnl-badge {
+  display: inline-flex; flex-direction: column; align-items: flex-end; gap: 1px;
+  padding: 3px 8px; border-radius: 6px; font-family: var(--font-mono);
+}
+.pnl-badge.pos { background: var(--pnl-pos-dim); color: var(--pnl-pos-bright); }
+.pnl-badge.neg { background: var(--pnl-neg-dim); color: var(--pnl-neg-bright); }
+.pnl-badge .pnl-badge-pct { font-size: 10px; opacity: 0.85; }
+
+/* Quick-size percentage row, OrderEntry's Quantity field -- each button
+   computes qty from REAL account cash (fetched, mode-aware) and the
+   REAL current price, never a placeholder split evenly with no basis. */
+.quick-pct-row { display: flex; gap: 6px; margin: -6px 0 12px; }
+.quick-pct-row .btn { flex: 1; padding: 4px 0; font-size: 11px; }
+
+/* Order preview block: real order value (qty x price) and the real,
+   already-measured p50 execution latency (GET /telemetry/latency, the
+   same aggregate StatusBar.js already surfaces) -- not a per-order
+   estimate invented for this panel. */
+.order-preview { margin: 10px 0 14px; padding: 10px 12px; background: var(--surface-2); border-radius: var(--radius); display: flex; flex-direction: column; gap: 6px; }
+.order-preview-row { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--text-dim); }
+.order-preview-row .mono { color: var(--text); }
+
+/* Time & Sales: a real, observed price-change row fading in, plus a
+   buy/sell tag inferred from the SAME real direction already computed
+   (tick rule) -- no invented trade size, see TimeAndSales.js's own
+   docstring on why that stays out. */
+@keyframes tape-row-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+.tape-row { animation: tape-row-in 0.3s ease-out; }
+.tape-tag { font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; letter-spacing: 0.04em; }
+.tape-tag.pos { background: var(--bid-dim); color: var(--bid-bright); }
+.tape-tag.neg { background: var(--ask-dim); color: var(--ask-bright); }
+.dash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
 .dash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
 .strategies-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
 .charts-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }

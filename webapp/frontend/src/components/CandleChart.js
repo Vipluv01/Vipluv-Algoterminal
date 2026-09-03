@@ -36,6 +36,21 @@ function secondsToKey(secs, mode) {
 const MAIN_INDICATORS = ["MA", "EMA", "BOLL", "SAR", "BBI"];
 const SUB_INDICATORS = ["VOL", "MACD", "RSI", "KDJ"];
 
+// klinecharts' own documented styles.candle.type values -- a pure view
+// toggle over the SAME real OHLC series (see the setStyles effect
+// below), never a second data source. "Line" maps to klinecharts' own
+// 'ohlc' style (the closest non-filled encoding it offers) rather than a
+// bare "line" type this library doesn't distinctly expose.
+const CHART_TYPES = [
+  { key: "candle_solid", label: "Candles" },
+  { key: "ohlc", label: "Line" },
+  { key: "area", label: "Area" },
+];
+
+function fmtOhlc(v) {
+  return v == null ? "—" : v.toFixed(2);
+}
+
 // Aggregates a stream of {price, timestamp} ticks into OHLCV candles,
 // bucketed by wall-clock time -- klinecharts wants real timestamps, not
 // a tick index, since its x-axis renders actual times. Seeded from GET
@@ -47,6 +62,11 @@ const SUB_INDICATORS = ["VOL", "MACD", "RSI", "KDJ"];
 // of gapping, duplicating, or misaligning with it.
 function useCandleAggregator(symbol, candleSeconds, mode) {
   const [loading, setLoading] = React.useState(true);
+  // The current (or, briefly after a seed with nothing forming yet, the
+  // last finalized) candle's own real OHLC -- surfaced for the toolbar's
+  // legend badges, NOT re-derived or guessed separately; same object
+  // every tick already updates the chart itself with.
+  const [latestCandle, setLatestCandle] = React.useState(null);
   const candlesRef = React.useRef([]);      // finalized candles
   const currentRef = React.useRef(null);     // in-progress candle
   const bucketStartRef = React.useRef(0);    // bucket NUMBER (not ms) of currentRef/the last-seen bucket
@@ -57,6 +77,7 @@ function useCandleAggregator(symbol, candleSeconds, mode) {
     if (!chart) return;
     const all = currentRef.current ? [...candlesRef.current, currentRef.current] : candlesRef.current;
     chart.applyNewData(all);
+    setLatestCandle(all.length ? all[all.length - 1] : null);
   }, []);
 
   const onTick = React.useCallback((price) => {
@@ -81,6 +102,7 @@ function useCandleAggregator(symbol, candleSeconds, mode) {
     if (chartApiRef.current) {
       chartApiRef.current.updateData({ ...currentRef.current });
     }
+    setLatestCandle({ ...currentRef.current });
   }, [candleSeconds]);
 
   const seedChart = React.useCallback((chart) => {
@@ -152,7 +174,7 @@ function useCandleAggregator(symbol, candleSeconds, mode) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, candleSeconds, mode]);
 
-  return { onTick, seedChart, loading };
+  return { onTick, seedChart, loading, latestCandle };
 }
 
 // The first consumer of the generic Modal primitive -- was its own bespoke
@@ -219,15 +241,25 @@ export function CandleChart({ symbol, price, height = "440px", stale = false, on
   const [active, setActive] = React.useState(() => new Set(["MA", "VOL"]));
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const [isFullscreen, setIsFullscreen] = React.useState(false);
-  const { onTick, seedChart, loading } = useCandleAggregator(symbol, candleSeconds, mode);
+  // klinecharts' own candle.type styles -- a view toggle, not a data
+  // change: every value here renders the SAME real OHLC series this
+  // component already aggregates, just with a different visual encoding.
+  const [chartType, setChartType] = React.useState("candle_solid");
+  const { onTick, seedChart, loading, latestCandle } = useCandleAggregator(symbol, candleSeconds, mode);
 
   React.useEffect(() => {
     const chart = init(containerId, {
       styles: {
         grid: { horizontal: { color: "#1f293b" }, vertical: { color: "#1f293b" } },
         candle: {
-          bar: { upColor: "#22c55e", downColor: "#f43f5e", upBorderColor: "#22c55e", downBorderColor: "#f43f5e", upWickColor: "#22c55e", downWickColor: "#f43f5e" },
-          priceMark: { last: { upColor: "#22c55e", downColor: "#f43f5e" } },
+          // #00e676/#ff1744 -- the SAME --bid/--ask hex values the rest
+          // of the app moved to earlier this session (theme.css); these
+          // were hardcoded here and missed that update, so the chart's
+          // own up/down colors had quietly drifted from every other
+          // bid/ask-colored element (OrderBook's depth bars, the
+          // ticker's pos/neg text) back to the old green/red pair.
+          bar: { upColor: "#00e676", downColor: "#ff1744", upBorderColor: "#00e676", downBorderColor: "#ff1744", upWickColor: "#00e676", downWickColor: "#ff1744" },
+          priceMark: { last: { upColor: "#00e676", downColor: "#ff1744" } },
           tooltip: { textColor: "#8892a6" },
         },
         xAxis: { axisLine: { color: "#1f293b" }, tickText: { color: "#5a6478" } },
@@ -260,6 +292,22 @@ export function CandleChart({ symbol, price, height = "440px", stale = false, on
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol]);
+
+  // View toggle only -- restyles how the SAME already-aggregated candles
+  // render (klinecharts' own candle.type), never touches candlesRef/
+  // currentRef or re-fetches anything. try/catch is defensive only: a
+  // future klinecharts upgrade rejecting an unexpected type string
+  // should degrade to "toggle did nothing this render" instead of
+  // crashing the whole chart.
+  React.useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    try {
+      chart.setStyles({ candle: { type: chartType } });
+    } catch {
+      /* non-fatal -- see comment above */
+    }
+  }, [chartType, symbol]);
 
   // Applies an incoming synced crosshair position (a data index broadcast
   // by a SIBLING pane) to this chart -- see Charts.js for the broadcast
@@ -318,8 +366,14 @@ export function CandleChart({ symbol, price, height = "440px", stale = false, on
       <div class="candle-toolbar">
         <div class="toggle-row candle-timeframes">
           ${Object.entries(candleOptions).map(([label, secs]) => html`
-            <button key=${label} class=${`btn btn-sm ${candleSeconds === secs ? "active neutral" : ""}`}
+            <button key=${label} class=${`btn btn-sm ${candleSeconds === secs ? "active neon" : ""}`}
                     onClick=${() => setCandleSeconds(secs)}>${label}</button>
+          `)}
+        </div>
+        <div class="toggle-row">
+          ${CHART_TYPES.map((t) => html`
+            <button key=${t.key} class=${`btn btn-sm ${chartType === t.key ? "active neon" : ""}`}
+                    onClick=${() => setChartType(t.key)}>${t.label}</button>
           `)}
         </div>
         <div style=${{ flex: 1 }} />
@@ -327,6 +381,14 @@ export function CandleChart({ symbol, price, height = "440px", stale = false, on
         <button class="btn btn-sm btn-ghost" onClick=${toggleFullscreen}>${isFullscreen ? "Exit Full Screen" : "Full Screen"}</button>
       </div>
       <div style=${{ position: "relative" }}>
+        ${latestCandle && html`
+          <div class="candle-ohlc-legend">
+            <span>O <b class="mono">${fmtOhlc(latestCandle.open)}</b></span>
+            <span>H <b class="mono pos">${fmtOhlc(latestCandle.high)}</b></span>
+            <span>L <b class="mono neg">${fmtOhlc(latestCandle.low)}</b></span>
+            <span>C <b class="mono">${fmtOhlc(latestCandle.close)}</b></span>
+          </div>
+        `}
         <div id=${containerId} class=${stale ? "is-stale" : ""}
              style=${{ width: "100%", height: isFullscreen ? "calc(100vh - 40px)" : height }} />
         ${loading && html`

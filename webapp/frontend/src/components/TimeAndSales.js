@@ -44,8 +44,9 @@ export function TimeAndSales({ tick, symbol }) {
         ${rows.length === 0
           ? html`<div style=${{ color: "var(--text-faint)", fontSize: "12px", padding: "16px 0", textAlign: "center" }}>No price changes yet</div>`
           : rows.map((r, i) => html`
-              <div key=${i} class="row hairline" style=${{ padding: "3px 4px", minHeight: "auto" }}>
-                <span class=${`mono ${r.direction === "up" ? "pos" : "neg"}`}>${fmtMoney(r.price)}</span>
+              <div key=${r.timestamp} class="row hairline tape-row" style=${{ padding: "3px 4px", minHeight: "auto", gap: "8px" }}>
+                <span class=${`tape-tag ${r.direction === "up" ? "pos" : "neg"}`}>${r.direction === "up" ? "BUY" : "SELL"}</span>
+                <span class=${`mono ${r.direction === "up" ? "pos" : "neg"}`} style=${{ flex: 1 }}>${fmtMoney(r.price)}</span>
                 <span class="mono" style=${{ color: "var(--text-faint)", fontSize: "10.5px" }}>
                   ${new Date(r.timestamp).toLocaleTimeString("en-IN", { hour12: false })}
                 </span>

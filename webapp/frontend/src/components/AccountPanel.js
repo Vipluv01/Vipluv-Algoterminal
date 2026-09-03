@@ -70,6 +70,23 @@ export function AccountPanel({ refreshKey }) {
 
   const openOrders = orders.filter((o) => o.status === "submitted" || o.status === "partially_filled");
 
+  // A market order in the OPPOSITE direction, sized to exactly the open
+  // qty -- the same manual action a trader would take to flatten a
+  // position, not a new order-type/endpoint. Live is never reachable
+  // here (this whole tab renders the "not available yet" note for live,
+  // see below), so this only ever submits paper/virtual.
+  async function closePosition(symbol, qty) {
+    try {
+      await api.orders.submit({ symbol, side: qty > 0 ? "sell" : "buy", order_type: "market", qty: Math.abs(qty), mode });
+      load();
+    } catch { /* surfaced via the position still showing open on next load */ }
+  }
+
+  async function cancelAllOpenOrders() {
+    await Promise.all(openOrders.map((o) => api.orders.cancel(o.id).catch(() => {})));
+    load();
+  }
+
   return html`
     <div class="panel panel-pad">
       <div class="tabs">
@@ -116,17 +133,32 @@ export function AccountPanel({ refreshKey }) {
             ? html`<div style=${{ color: "var(--text-faint)", padding: "12px 0" }}>No open positions</div>`
             : html`
               <div>
-                <div class="table-row hairline" style=${{ color: "var(--text-faint)", fontSize: "10.5px", textTransform: "uppercase", letterSpacing: "0.06em" }}>
-                  <span>Symbol</span><span>Qty</span><span>Avg Entry</span><span>Unrealized</span>
+                <div class="table-row positions-row hairline" style=${{ color: "var(--text-faint)", fontSize: "10.5px", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                  <span>Symbol</span><span>Qty</span><span>Avg Entry</span><span>Unrealized</span><span></span>
                 </div>
-                ${account.positions.map((p) => html`
-                  <div key=${p.symbol} class="table-row hairline">
+                ${account.positions.map((p) => {
+                  // Real % return -- unrealized P&L over the position's
+                  // own cost basis (abs(qty) * avg_entry_px), the same
+                  // math app/routers/portfolio.py's attribution already
+                  // uses for a position's own return, not a new formula
+                  // invented for this badge.
+                  const costBasis = Math.abs(p.qty) * p.avg_entry_px;
+                  const pctReturn = costBasis > 0 ? (p.unrealized_pnl / costBasis) * 100 : null;
+                  return html`
+                  <div key=${p.symbol} class="table-row positions-row hairline">
                     <span style=${{ fontWeight: 600 }}>${p.symbol}</span>
                     <span class=${`mono ${pnlClass(p.qty)}`}>${p.qty > 0 ? "+" : ""}${fmtNum(p.qty)}</span>
                     <span class="mono">${fmtMoney(p.avg_entry_px)}</span>
-                    <span class=${`mono ${pnlClass(p.unrealized_pnl)}`}>${fmtMoney(p.unrealized_pnl)}</span>
+                    <span style=${{ display: "flex", justifyContent: "flex-end" }}>
+                      <span class=${`pnl-badge ${pnlClass(p.unrealized_pnl)}`}>
+                        <span>${fmtMoney(p.unrealized_pnl)}</span>
+                        ${pctReturn != null && html`<span class="pnl-badge-pct">${pctReturn >= 0 ? "+" : ""}${pctReturn.toFixed(2)}%</span>`}
+                      </span>
+                    </span>
+                    <span><button class="btn btn-sm btn-ghost" onClick=${() => closePosition(p.symbol, p.qty)}>Close</button></span>
                   </div>
-                `)}
+                `;
+                })}
               </div>
             `}
         <//>
@@ -135,14 +167,21 @@ export function AccountPanel({ refreshKey }) {
       ${!loading && tab === "Open Orders" && html`
         ${!openOrders.length
           ? html`<div style=${{ color: "var(--text-faint)", padding: "12px 0" }}>No open orders</div>`
-          : openOrders.map((o) => html`
-            <div key=${o.id} class="table-row hairline">
-              <span class=${o.side === "buy" ? "pos" : "neg"}>${o.side === "buy" ? "▲" : "▼"} ${o.symbol}</span>
-              <span class="mono">${o.order_type === "limit" ? fmtMoney(o.px) : "MKT"}</span>
-              <span class="mono">${o.qty}</span>
-              <span><button class="btn btn-sm btn-ghost" onClick=${() => cancel(o.id)}>cancel</button></span>
-            </div>
-          `)}
+          : html`
+            <${React.Fragment}>
+              <div style=${{ display: "flex", justifyContent: "flex-end", marginBottom: "8px" }}>
+                <button class="btn btn-sm btn-ghost" onClick=${cancelAllOpenOrders}>Cancel All (${openOrders.length})</button>
+              </div>
+              ${openOrders.map((o) => html`
+                <div key=${o.id} class="table-row hairline">
+                  <span class=${o.side === "buy" ? "pos" : "neg"}>${o.side === "buy" ? "▲" : "▼"} ${o.symbol}</span>
+                  <span class="mono">${o.order_type === "limit" ? fmtMoney(o.px) : "MKT"}</span>
+                  <span class="mono">${o.qty}</span>
+                  <span><button class="btn btn-sm btn-ghost" onClick=${() => cancel(o.id)}>cancel</button></span>
+                </div>
+              `)}
+            <//>
+          `}
       `}
 
       ${!loading && tab === "Brackets" && html`

@@ -1,7 +1,7 @@
 import React from "react";
 import { html } from "../html.js";
 import { api, subscribeMarketForMode } from "../api.js";
-import { fmtMoney } from "../format.js";
+import { fmtMoney, fmtNum } from "../format.js";
 import { CandleChart } from "../components/CandleChart.js";
 import { OrderBook } from "../components/OrderBook.js";
 import { OrderEntry } from "../components/OrderEntry.js";
@@ -11,6 +11,96 @@ import { DEFAULT_STALE_THRESHOLD_MS, useStaleness } from "../clock.js";
 import { useMode } from "../mode.js";
 
 const STATUS_LABEL = { connecting: "Connecting…", live: "Live", reconnecting: "Reconnecting…", offline: "Offline", disconnected: "Disconnected — not retrying" };
+
+// Real change%/high/low/volume, never a placeholder sitting next to a
+// real price. Live mode uses api.live.quotes (real LTP vs real previous
+// close -- the same fix Ticker.js's own %-change bug used) plus one real
+// daily bar (Angel One aggregates that day's own high/low/volume server
+// side, more reliable than re-aggregating 1m bars here and risking a
+// multi-day window if the intraday lookback happens to span one -- see
+// live_market.py's own 10-day-floor lookback comment on why that can
+// happen). Paper/virtual has no "1d" interval (the simulated engine's
+// price_history is per-second/per-minute, not calendar-day-aware) and no
+// real previous-close concept either, so it's labeled "Session" and
+// derived from the last 24 real 1hr bars instead -- an honestly
+// different (and honestly labeled) window, not a forced "24h" claim
+// paper mode has no basis for.
+function useSymbolStats(symbol, mode) {
+  const [stats, setStats] = React.useState(null);
+
+  React.useEffect(() => {
+    if (!symbol) { setStats(null); return; }
+    let cancelled = false;
+
+    async function load() {
+      try {
+        if (mode === "live") {
+          const [quotesRes, histRes] = await Promise.all([
+            api.live.quotes([symbol]),
+            api.live.history(symbol, "1d", 1),
+          ]);
+          if (cancelled) return;
+          const q = quotesRes.quotes[0];
+          const bar = histRes.bars[histRes.bars.length - 1];
+          const changePct = q?.ltp != null && q?.close ? ((q.ltp - q.close) / q.close) * 100 : null;
+          setStats({ changePct, high: bar?.high ?? null, low: bar?.low ?? null, volume: bar?.volume ?? null });
+        } else {
+          const hist = await api.market.history(symbol, "1hr", 24);
+          if (cancelled) return;
+          const bars = hist.bars;
+          if (!bars.length) { setStats({ changePct: null, high: null, low: null, volume: null }); return; }
+          const high = Math.max(...bars.map((b) => b.high));
+          const low = Math.min(...bars.map((b) => b.low));
+          const volume = bars.reduce((s, b) => s + (b.volume ?? 0), 0);
+          const changePct = bars[0].open ? ((bars[bars.length - 1].close - bars[0].open) / bars[0].open) * 100 : null;
+          setStats({ changePct, high, low, volume });
+        }
+      } catch {
+        if (!cancelled) setStats({ changePct: null, high: null, low: null, volume: null });
+      }
+    }
+    load();
+    // Live polls slower -- this is a real Angel One call (quotes +
+    // history), not free the way the simulated engine's own local
+    // aggregate is; no reason to hit it as often as paper's.
+    const id = setInterval(load, mode === "live" ? 30000 : 10000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [symbol, mode]);
+
+  return stats;
+}
+
+function SymbolStatsHeader({ symbol, price, mode }) {
+  const stats = useSymbolStats(symbol, mode);
+  const windowLabel = mode === "live" ? "24h" : "Session";
+  const changeClass = stats?.changePct == null ? "" : stats.changePct >= 0 ? "pos" : "neg";
+  return html`
+    <div class="symbol-stats-header">
+      <div>
+        <div class="stat-label">${symbol}</div>
+        <div class="mono" style=${{ fontSize: "20px", fontWeight: 700 }}>${price ? fmtMoney(price) : "—"}</div>
+      </div>
+      <div>
+        <div class="stat-label">${windowLabel} Change</div>
+        <div class=${`mono stat-value ${changeClass}`}>
+          ${stats?.changePct == null ? "—" : `${stats.changePct >= 0 ? "+" : ""}${stats.changePct.toFixed(2)}%`}
+        </div>
+      </div>
+      <div>
+        <div class="stat-label">${windowLabel} High</div>
+        <div class="mono stat-value">${stats?.high != null ? fmtMoney(stats.high) : "—"}</div>
+      </div>
+      <div>
+        <div class="stat-label">${windowLabel} Low</div>
+        <div class="mono stat-value">${stats?.low != null ? fmtMoney(stats.low) : "—"}</div>
+      </div>
+      <div>
+        <div class="stat-label">${windowLabel} Volume</div>
+        <div class="mono stat-value">${stats?.volume != null ? fmtNum(stats.volume) : "—"}</div>
+      </div>
+    </div>
+  `;
+}
 
 function SymbolTabs({ symbols, active, onSelect, ticks }) {
   return html`
@@ -107,21 +197,34 @@ export function Terminal() {
   else status = "reconnecting";
 
   const tick = ticks[active];
+  const modeSubtitle = tradingMode === "live"
+    ? "Live trading via Angel One — every order is human-confirmed before it reaches the broker"
+    : tradingMode === "virtual"
+      ? "Virtual trading (₹1 Cr simulated capital) against the real bourse matching engine"
+      : "Paper trading against the real bourse matching engine";
+  // A real, computed staleness string for the status pill's tooltip, not
+  // just the coarse live/reconnecting/offline label -- lastTickAt is the
+  // actual last real tick this connection received.
+  const staleTooltip = lastTickAt === null
+    ? "No tick received yet"
+    : `Last tick ${Math.max(0, Math.round((Date.now() - lastTickAt) / 1000))}s ago`;
 
   return html`
     <div class="page fade-in">
       <div style=${{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>
         <div>
           <h1 style=${{ margin: 0, fontSize: "20px", fontWeight: 800, letterSpacing: "-0.01em" }}>Terminal</h1>
-          <div style=${{ color: "var(--text-faint)", fontSize: "12px", marginTop: "2px" }}>Paper trading against the real bourse matching engine</div>
+          <div style=${{ color: "var(--text-faint)", fontSize: "12px", marginTop: "2px" }}>${modeSubtitle}</div>
         </div>
-        <div class="status-pill">
+        <div class="status-pill" title=${staleTooltip}>
           <span class=${`status-dot ${status === "live" ? "live" : "dead"}`} />
           ${STATUS_LABEL[status]}
         </div>
       </div>
 
       <${SymbolTabs} symbols=${visibleSymbols} active=${active} onSelect=${setActive} ticks=${ticks} />
+
+      ${active && html`<${SymbolStatsHeader} symbol=${active} price=${tick?.price} mode=${tradingMode} />`}
 
       ${active && html`
         <div class="terminal-grid">
