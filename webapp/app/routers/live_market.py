@@ -45,10 +45,27 @@ from app.auth import get_current_user
 from app.broker.adapter_cache import IncompleteBrokerCredentialError, NoBrokerCredentialError, get_adapter_for_user
 from app.broker.angelone import AngelOneError
 from app.broker.feed_registry import FeedCreationThrottled, acquire_feed, release_feed
+from app.broker.instrument_master import list_live_equity_names
 from app.db import get_db
 from app.models.user import User
 
 router = APIRouter(prefix="/live", tags=["live"])
+
+
+@router.get("/market/equities", response_model=list[str])
+def get_live_equities():
+    """Every real NSE equity Angel One's own instrument master currently
+    lists (~2000+) -- NOT this app's own 7-symbol NAMED_INSTRUMENTS
+    (app/markets.py), which paper/virtual's simulated engine is fixed
+    to. A local instrument-master lookup, no broker credential or real
+    Angel One call needed (same reasoning as GET /live/options/
+    underlyings' own docstring). This is what lets a live-mode symbol
+    picker offer any real stock, not just the handful the simulated
+    engine also happens to model -- the live history/quote/WS endpoints
+    below already accept an arbitrary resolvable symbol string; the only
+    thing that was ever narrower was the frontend's own picker source
+    (GET /symbols, paper-oriented)."""
+    return list_live_equity_names()
 
 # Angel One's getCandleData only offers whole-minute-and-up granularity
 # (see angelone.py's own CANDLE_INTERVALS) -- there is no live-mode

@@ -230,6 +230,11 @@ export const api = {
     // separate requests -- the same batching lesson get_quote_batch's
     // own MAX_TOKENS_PER_BATCH already established.
     quotes: (symbols) => request("GET", `/live/market/quotes?symbols=${encodeURIComponent(symbols.join(","))}`),
+    // Every real NSE equity (~2000+), not just this app's own 7-symbol
+    // simulated universe -- see app/routers/live_market.py's own
+    // get_live_equities docstring. A local instrument-master lookup, no
+    // real Angel One call.
+    equities: () => request("GET", "/live/market/equities"),
     // Real Angel One options chain (app/routers/live_options.py) -- a
     // completely separate universe/shape from `options` above (221 real
     // underlyings vs. the synthetic 9-symbol chain, real bid/ask/LTP vs.

@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -80,6 +81,20 @@ _underlyings_sorted: list[str] | None = None
 # ticker isn't currently listed under any instrument type at all,
 # almost certainly the real corporate demerger, not a bug).
 _equity_names: set[str] | None = None
+_equity_names_sorted: list[str] | None = None  # same set, sorted once for list_live_equity_names()
+# Guards the check-then-parse in _ensure_loaded below -- every route that
+# touches this module (GET /symbols per NAMED_INSTRUMENTS symbol, the
+# options chain endpoints, and now GET /live/market/equities) runs
+# through FastAPI's own threadpool for a sync def route, so real
+# concurrent requests were already possible; without this lock, several
+# of them arriving while _cache is still None each start their OWN full
+# 142,867-row parse of the same 33MB file at once. Confirmed live,
+# 2026-09-04: right after adding the new equities endpoint (higher
+# request volume against this module than before), CPU pinned at 228%
+# and a single request took 40+ seconds with no error logged -- multiple
+# threads burning CPU on redundant parses of the identical file,
+# competing for the GIL, not a hang.
+_load_lock = threading.Lock()
 
 
 def _fetch_and_cache() -> None:
@@ -133,32 +148,68 @@ def _load_from_disk() -> tuple[dict[str, list[OptionContract]], set[str]]:
             # RELIANCE-EQ) -- plain equities carry an EMPTY instrumenttype
             # string, not a named one the way options do.
             name = row.get("name")
-            if name:
+            # NSE's own connectivity-test securities (e.g. "011NSETEST",
+            # "G1NSETEST") are real rows in this file, shaped identically
+            # to a genuine equity listing -- confirmed live, 2026-09-04:
+            # 22 of them, every one ending in exactly "NSETEST". These
+            # are never real, tradable companies; showing them in a
+            # live-mode symbol search would look like fabricated/garbage
+            # data even though the row itself is real.
+            if name and not name.endswith("NSETEST"):
                 equity_names.add(name)
 
     return by_underlying, equity_names
 
 
 def _ensure_loaded(force_refresh: bool = False) -> None:
-    global _cache, _cache_loaded_at, _underlyings_sorted, _equity_names
+    global _cache, _cache_loaded_at, _underlyings_sorted, _equity_names, _equity_names_sorted
 
-    needs_download = force_refresh or not CACHE_PATH.exists()
-    if not needs_download:
-        age_seconds = time.time() - CACHE_PATH.stat().st_mtime
-        needs_download = age_seconds > REFRESH_INTERVAL_SECONDS
+    # Cheap lock-free fast path for the overwhelming majority of calls
+    # (already loaded, not stale) -- avoids acquiring _load_lock on every
+    # single request just to immediately find there's nothing to do.
+    if _cache is not None and not force_refresh and CACHE_PATH.exists():
+        if time.time() - CACHE_PATH.stat().st_mtime <= REFRESH_INTERVAL_SECONDS:
+            return
 
-    if needs_download:
-        _fetch_and_cache()
-        _cache = None  # force a re-parse below even if this process already had an in-memory copy
+    with _load_lock:
+        # Re-check inside the lock: another thread may have already done
+        # this work (download + parse, or just the parse) while this one
+        # was waiting to acquire it -- without this, N threads that all
+        # saw `_cache is None` on the fast path above would each still
+        # queue up and redundantly redo the full parse one after another.
+        needs_download = force_refresh or not CACHE_PATH.exists()
+        if not needs_download:
+            age_seconds = time.time() - CACHE_PATH.stat().st_mtime
+            needs_download = age_seconds > REFRESH_INTERVAL_SECONDS
 
-    if _cache is None:
-        _cache, _equity_names = _load_from_disk()
-        _cache_loaded_at = time.time()
-        _underlyings_sorted = sorted(_cache.keys())
-        log.info(
-            "Loaded Angel One instrument master: %d underlyings, %d option contracts",
-            len(_underlyings_sorted), sum(len(v) for v in _cache.values()),
-        )
+        if needs_download:
+            _fetch_and_cache()
+            _cache = None  # force a re-parse below even if this process already had an in-memory copy
+
+        if _cache is None:
+            _cache, _equity_names = _load_from_disk()
+            _cache_loaded_at = time.time()
+            _underlyings_sorted = sorted(_cache.keys())
+            _equity_names_sorted = sorted(_equity_names)
+            log.info(
+                "Loaded Angel One instrument master: %d underlyings, %d option contracts, %d equities",
+                len(_underlyings_sorted), sum(len(v) for v in _cache.values()), len(_equity_names_sorted),
+            )
+
+
+def list_live_equity_names() -> list[str]:
+    """Every real NSE equity Angel One's own instrument master currently
+    lists (~2000+, confirmed live) -- not this app's own 7-symbol
+    NAMED_INSTRUMENTS (app/markets.py), which paper/virtual's simulated
+    engine is deliberately fixed to. The same real universe
+    is_equity_live_tradable already checks membership against, exposed
+    here as the full list so a live-mode symbol picker can offer any of
+    them, not just whichever 7 the simulated engine happens to also
+    model. Sorted once at load time (this list doesn't change within a
+    process's cache lifetime), not re-sorted per request."""
+    _ensure_loaded()
+    assert _equity_names_sorted is not None
+    return _equity_names_sorted
 
 
 def list_option_underlyings() -> list[str]:

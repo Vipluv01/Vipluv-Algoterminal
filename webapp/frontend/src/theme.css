@@ -922,6 +922,19 @@ a:hover { text-decoration: underline; }
 .symbol-stats-header .stat-label { margin-bottom: 3px; }
 .symbol-stats-header .stat-value { font-size: 15px; }
 
+/* Live-mode symbol search (Terminal.js's LiveSymbolSearch) -- a
+   type-to-filter dropdown over the real ~2000+ equity universe, distinct
+   from the curated .chip strip's fixed 7 names. */
+.live-symbol-search { position: relative; margin-bottom: 12px; max-width: 360px; }
+.live-symbol-results {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 20;
+  max-height: 260px; overflow-y: auto;
+  background: var(--surface); border: 1px solid var(--border-bright); border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+}
+.live-symbol-result { padding: 8px 12px; font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.live-symbol-result:hover { background: var(--surface-hover); }
+
 /* Chart toolbar "neon" active state -- a distinct treatment from the
    buy/sell/neutral toggle-row states above, reserved for the chart's own
    timeframe/view controls specifically. Uses --cyber, the same
