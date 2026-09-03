@@ -20,11 +20,13 @@ import { Ticker } from "./components/Ticker.js";
 import { StatusBar } from "./components/StatusBar.js";
 import { ShortcutOverlay } from "./components/ShortcutOverlay.js";
 import { ModeSwitcher } from "./components/ModeSwitcher.js";
+import { CommandPalette, openCommandPalette } from "./components/CommandPalette.js";
 import { useTradingHalted, refreshRiskStatus } from "./riskStatus.js";
 import { api } from "./api.js";
 import { useToast } from "./toast.js";
 import { useShortcuts } from "./keyboard.js";
 import { setTicketIntent } from "./ticketIntent.js";
+import { NAV_ITEMS } from "./navItems.js";
 
 const ROUTES = {
   "": Landing,
@@ -45,24 +47,6 @@ const ROUTES = {
   "#/portfolio-iq": PortfolioIQ,
   "#/options": Options,
 };
-
-const NAV_ITEMS = [
-  { hash: "#/terminal", label: "Terminal", chord: "G T" },
-  { hash: "#/charts", label: "Charts", chord: "G C" },
-  { hash: "#/dashboard", label: "Dashboard", chord: "G D" },
-  { hash: "#/strategies", label: "Strategies" },
-  { hash: "#/pairs", label: "Pairs", chord: "G P" },
-  { hash: "#/options", label: "Options", chord: "G O" },
-  { hash: "#/optimizer", label: "Optimizer" },
-  { hash: "#/trade", label: "Trade" },
-  { hash: "#/risk", label: "Risk" },
-  { hash: "#/accounts", label: "Accounts" },
-  { hash: "#/journal", label: "Journal", chord: "G J" },
-  { hash: "#/logs", label: "Logs", chord: "G L" },
-  { hash: "#/settings", label: "Vault", chord: "G V" },
-  { hash: "#/leaderboard", label: "Leaderboard", chord: "G B" },
-  { hash: "#/portfolio-iq", label: "Portfolio IQ", chord: "G I" },
-];
 
 const GOTO = (hash) => () => { window.location.hash = hash; };
 
@@ -142,6 +126,11 @@ export function App() {
     },
     { chord: "esc", description: "Close menu / overlay", group: "General", handler: () => { setMobileNavOpen(false); setShortcutsOpen(false); } },
     { chord: "?", description: "Show keyboard shortcuts", group: "General", handler: () => setShortcutsOpen(true) },
+    // Cmd+K is registered separately, inside CommandPalette.js itself --
+    // this registry deliberately ignores every keydown with a modifier
+    // held, so a held-modifier shortcut can't go through it. "/" has no
+    // modifier and fits the registry fine, same open action either way.
+    { chord: "/", description: "Command palette (or Cmd+K)", group: "General", handler: () => openCommandPalette() },
     // eslint-disable-next-line react-hooks/exhaustive-deps
   ], []);
   useShortcuts(bindings);
@@ -182,6 +171,7 @@ export function App() {
       <${Page} />
       ${!isLanding && html`<${StatusBar} />`}
       ${shortcutsOpen && html`<${ShortcutOverlay} onClose=${() => setShortcutsOpen(false)} />`}
+      <${CommandPalette} />
     <//>
   `;
 }
