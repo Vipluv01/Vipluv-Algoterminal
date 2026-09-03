@@ -27,11 +27,12 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user
 from app.brackets import cancel_brackets_closed_elsewhere
 from app.broker.adapter_cache import IncompleteBrokerCredentialError, NoBrokerCredentialError, get_adapter_for_user
-from app.broker.angelone import AngelOneError
+from app.broker.angelone import AngelOneAdapter, AngelOneError
+from app.broker.instrument_master import resolve_option_contract
 from app.broker.notify import notify_order_submitted
 from app.db import get_db
 from app.markets import DERIVED_INDICES, HUMAN_USER_OWNER_ID, MarketRegistry
-from app.models.trading import Bracket, Mode, Order, OrderStatus, OrderType, Side
+from app.models.trading import Bracket, InstrumentType, Mode, Order, OrderStatus, OrderType, Side
 from app.models.user import User
 from app.orders_limits import MAX_ORDER_QTY
 from app.risk_settings_service import raise_if_trading_halted
@@ -218,6 +219,47 @@ def submit_order(
     return order
 
 
+def _resolve_and_place_option_order(adapter: AngelOneAdapter, order: Order) -> str:
+    """The options analogue of resolve_equity_symbol + place_order below
+    -- the two real-money-safety properties that matter here are the
+    SAME ones equity confirmation already established: resolve from the
+    order's own structured fields (underlying/expiry/strike/option_type),
+    never guess, and raise rather than silently substitute when the real
+    exchange doesn't have an exact match.
+
+    Options are actually a SAFER resolution problem than equities were:
+    (underlying, expiry, strike, option_type) is a compound key the
+    exchange itself guarantees identifies at most one real contract --
+    there's no equivalent of equity's "-EQ vs -AF vs an ETF sharing the
+    ticker prefix" ambiguity to filter through. resolve_option_contract
+    already returns None (not a guess) when nothing matches, so this
+    function's only job is turning that into a clear rejection.
+
+    product_type="CARRYFORWARD", not the equity path's "INTRADAY" --
+    confirmed as a genuine, deliberate difference: this app's own
+    options strategies (app/strategies/options_base.py) are multi-day
+    holds (real hold_days values), and INTRADAY positions get
+    auto-square-off by the broker before market close. Using it here
+    would silently force-close a position the strategy intends to keep
+    open overnight. NOT independently verified against a real placed
+    order (this session never places one) -- flagged the same way
+    angelone.py's own confidence caveats already are, worth confirming
+    with a small real order before trusting at size.
+    """
+    contract = resolve_option_contract(order.underlying, order.expiry, order.strike, order.option_type)
+    if contract is None:
+        raise AngelOneError(
+            f"could not resolve {order.underlying!r} {order.expiry!r} strike={order.strike!r} "
+            f"{order.option_type!r} to a real, currently-listed Angel One contract"
+        )
+    return adapter.place_order(
+        symbol=contract.tradingsymbol, symboltoken=contract.token, exchange=contract.exchange_segment,
+        side=order.side.value, qty=order.qty * (order.lot_size or 1),
+        order_type="MARKET" if order.order_type == OrderType.market else "LIMIT", price=order.px,
+        product_type="CARRYFORWARD",
+    )
+
+
 @router.post("/{order_id}/confirm", response_model=OrderOut)
 def confirm_live_order(
     order_id: int,
@@ -246,17 +288,21 @@ def confirm_live_order(
         raise HTTPException(status_code=400, detail=str(e))
 
     try:
-        # resolve_equity_symbol, not search_symbol_token + matches[0] --
-        # a real-money-safety bug found live: matches[0] is not guaranteed
-        # to be the equity entry (e.g. SBIN's search returns 14 series,
-        # matches[0] would have been SBIN-AF, not the actual stock). See
-        # AngelOneAdapter.resolve_equity_symbol's own docstring.
-        match = adapter.resolve_equity_symbol("NSE", order.symbol)
-        broker_order_id = adapter.place_order(
-            symbol=match.get("tradingsymbol", order.symbol), symboltoken=match["symboltoken"],
-            exchange=match.get("exchange", "NSE"), side=order.side.value, qty=order.qty,
-            order_type="MARKET" if order.order_type == OrderType.market else "LIMIT", price=order.px,
-        )
+        if order.instrument_type == InstrumentType.option:
+            broker_order_id = _resolve_and_place_option_order(adapter, order)
+        else:
+            # resolve_equity_symbol, not search_symbol_token + matches[0]
+            # -- a real-money-safety bug found live: matches[0] is not
+            # guaranteed to be the equity entry (e.g. SBIN's search
+            # returns 14 series, matches[0] would have been SBIN-AF, not
+            # the actual stock). See AngelOneAdapter.resolve_equity_
+            # symbol's own docstring.
+            match = adapter.resolve_equity_symbol("NSE", order.symbol)
+            broker_order_id = adapter.place_order(
+                symbol=match.get("tradingsymbol", order.symbol), symboltoken=match["symboltoken"],
+                exchange=match.get("exchange", "NSE"), side=order.side.value, qty=order.qty,
+                order_type="MARKET" if order.order_type == OrderType.market else "LIMIT", price=order.px,
+            )
     except AngelOneError as e:
         # Rejected, not silently left pending -- a human retrying a
         # confirm that's genuinely going to keep failing (e.g. a bad
