@@ -1079,6 +1079,53 @@ a:hover { text-decoration: underline; }
 .blueprint-label { font-weight: 600; font-size: 12.5px; white-space: nowrap; }
 .blueprint-detail { color: var(--text-faint); font-size: 11.5px; text-align: right; }
 
+/* Section kicker: a small bracketed label above a section title
+   ("[ STRATEGIES ]") -- uses --cyber, the same interactive-accent token
+   already established for toggles/active tabs elsewhere on this page,
+   not --bid (bid/ask green stays reserved for actual bid/ask prices). */
+.section-kicker {
+  display: inline-block; font-family: var(--font-mono); font-size: 10.5px; font-weight: 700;
+  letter-spacing: 0.1em; color: var(--cyber-bright); background: var(--cyber-dim);
+  border: 1px solid var(--cyber-dim); border-radius: 4px; padding: 3px 10px; margin-bottom: 10px;
+}
+
+/* Enhanced CTA hover: a crisp glowing outline ring (0 0 0 1px) plus the
+   diffuse glow, both in one box-shadow list -- .glow-hover already
+   existed with just the diffuse glow; this adds the "outline" half of
+   the ask. Real bid-green hex (#00e676) reused here deliberately -- a
+   CTA's hover state is a generic "go" affordance, not a price sitting
+   next to real bid/ask data, so it doesn't create the same conflation
+   the order book's own bid/ask colors have to stay careful about. */
+.glow-hover:hover { box-shadow: 0 0 0 1px rgba(0, 230, 118, 0.4), 0 0 25px rgba(0, 230, 118, 0.15); }
+
+/* Comparison table: plain prose rows (not DataTable's numeric-grid
+   model, which is built for uniform tabular values, not two full
+   sentences per row) in a 3-column grid, collapsing to labeled stacked
+   rows on mobile. */
+.comparison-table { display: flex; flex-direction: column; }
+.comparison-row { display: grid; grid-template-columns: 1fr 1.3fr 1.3fr; gap: 20px; padding: 14px 0; border-bottom: 1px solid var(--border); align-items: baseline; }
+.comparison-row:last-child { border-bottom: none; }
+.comparison-header { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); padding-bottom: 10px; align-items: end; }
+.comparison-dim { font-weight: 700; font-size: 13px; }
+.comparison-traditional { color: var(--text-faint); font-size: 12px; line-height: 1.5; }
+.comparison-bourse { color: var(--text); font-size: 12.5px; font-weight: 600; line-height: 1.5; }
+.comparison-check { color: var(--cyber-bright); margin-right: 6px; }
+
+/* Hero metric ticker: the SAME real marquee mechanism (.ticker/.ticker-
+   track/@keyframes ticker-scroll) the app-wide price ticker already
+   uses -- the mechanism itself has no price-specific behavior baked in,
+   only the content differs, so this reuses it rather than duplicating
+   the animation. */
+.landing-metric-ticker { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.landing-metric-ticker .ticker-item { color: var(--text-dim); }
+
+@media (max-width: 900px) {
+  .comparison-header { display: none; }
+  .comparison-row { grid-template-columns: 1fr; gap: 6px; padding: 16px 0; }
+  .comparison-traditional::before { content: "Traditional — "; color: var(--text-faint); font-weight: 700; }
+  .comparison-bourse::before { content: "Bourse Core — "; color: var(--cyber-bright); font-weight: 700; }
+}
+
 @media (max-width: 900px) {
   .landing-container { padding: 0 20px; }
   .landing-section { margin-top: 56px; }
