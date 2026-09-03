@@ -900,19 +900,58 @@ a:hover { text-decoration: underline; }
 /* ---------- Landing page ---------- */
 
 .landing-page { min-height: 100vh; position: relative; overflow-x: hidden; }
+
+/* Unified container + vertical rhythm: every section below shares ONE
+   max-width/gutter and one section-to-section spacing, instead of each
+   section inlining its own max-width/margin/padding in Landing.js (the
+   780px/1000px/no-max-width drift that existed side by side before this
+   pass). Landing-scoped only -- .page (the rest of the app's own
+   container) is untouched. */
+.landing-container { max-width: 1200px; margin: 0 auto; padding: 0 32px; }
+.landing-section { margin-top: 80px; }
+
+/* Card inner padding standardized to 24px for landing-page cards ONLY --
+   scoped under .landing-page rather than changing .panel-pad/.stat-card
+   themselves, which are shared, app-wide utilities 17 other real screens
+   already rely on at their own (smaller, deliberately denser) padding. */
+.landing-page .panel-pad, .landing-page .stat-card { padding: 24px; }
+
 /* A fixed, subtle glow field behind the whole page rather than one blob
    pinned to the hero -- z-index: -1 (not a lower stacking context via
    position alone) so it never intercepts clicks/scroll on anything real
    above it. Two radial gradients, teal + violet, reusing the SAME accent
    tokens every other real element on this page already does -- this is
-   depth/polish, not a second, competing color system. */
+   depth/polish, not a second, competing color system. The slow
+   background-position drift is a decorative float, same "decorate a
+   real element, invent nothing" rule as the order book's own flash
+   highlight -- there's no data behind this animation to misrepresent. */
 .landing-glow {
   position: fixed; inset: 0; z-index: -1; pointer-events: none;
   background:
     radial-gradient(600px circle at 20% 8%, rgba(45,212,191,0.10), transparent 60%),
     radial-gradient(500px circle at 85% 30%, rgba(167,139,250,0.08), transparent 60%);
+  animation: landing-glow-float 18s ease-in-out infinite;
+}
+@keyframes landing-glow-float {
+  0%, 100% { background-position: 0% 0%, 100% 0%; }
+  50% { background-position: 2% -3%, 98% 3%; }
 }
 :root[data-theme="light"] .landing-glow { opacity: 0.5; }
+
+/* Subtle mesh grid behind the hero specifically -- masked so it fades
+   out toward the bottom of the viewport instead of tiling across every
+   real section further down the page. */
+.landing-mesh {
+  position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background-image:
+    linear-gradient(to right, rgba(255,255,255,0.03) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255,255,255,0.03) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse 60% 55% at 50% 0%, black 40%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 60% 55% at 50% 0%, black 40%, transparent 100%);
+}
+:root[data-theme="light"] .landing-mesh { opacity: 0.4; }
+
 /* Glassmorphism, built on the SAME --surface/--border/--shadow-glow
    tokens every other panel in this app already uses -- not a second
    palette, just more depth for the landing page specifically. backdrop-
@@ -932,8 +971,29 @@ a:hover { text-decoration: underline; }
 }
 .glass-panel:hover, .glass-card:hover { border-color: rgba(45,212,191,0.35); box-shadow: var(--shadow-glow); transform: translateY(-2px); }
 
-.landing-hero {
-  max-width: 780px; margin: 0 auto; padding: 90px 24px 40px; text-align: center;
+/* Generic hover-glow utility -- applied only where Landing.js opts in
+   (tab buttons, primary CTAs), never folded into .btn-primary itself,
+   which is a shared, app-wide class 17 other real screens also use. */
+.glow-hover { transition: box-shadow 0.25s ease; }
+.glow-hover:hover { box-shadow: 0 0 25px rgba(0, 230, 118, 0.15); }
+
+.landing-hero-grid {
+  display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 48px; align-items: center;
+  padding-top: 90px; padding-bottom: 40px;
+}
+.landing-hero-left { text-align: left; }
+.landing-badge-glow { box-shadow: 0 0 20px var(--cyber-dim); }
+/* Muted white->slate gradient for the bulk of the headline (exact spec
+   value) -- the ONE highlighted word inside it keeps its own existing
+   .grad-text (teal/violet, unchanged): a child element re-establishes
+   its own background-clip independently, so nesting the two is safe. */
+.hero-gradient-text {
+  background: linear-gradient(135deg, #FFFFFF 0%, #94A3B8 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+:root[data-theme="light"] .hero-gradient-text {
+  background: linear-gradient(135deg, #0F172A 0%, #475569 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
 }
 .landing-title {
   font-size: 44px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.15; margin: 0;
@@ -942,17 +1002,29 @@ a:hover { text-decoration: underline; }
   background: linear-gradient(135deg, var(--accent-bright), var(--violet));
   -webkit-background-clip: text; background-clip: text; color: transparent;
 }
-.landing-sub { color: var(--text-dim); font-size: 15px; line-height: 1.6; max-width: 560px; margin: 20px auto 0; }
-.landing-stats {
-  max-width: 1000px; margin: 20px auto 0; padding: 0 24px;
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
-}
-.landing-features {
-  max-width: 1000px; margin: 60px auto 0; padding: 0 24px;
-  display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px;
-}
+.landing-sub-left { color: var(--text-dim); font-size: 15px; line-height: 1.6; max-width: 520px; margin: 20px 0 0; }
+
+/* The hero's floating live book widget reuses the SAME real OrderBook
+   component every other screen (Terminal included) renders -- this only
+   pushes its depth-bar opacity up and adds a matching colored glow,
+   scoped to just this widget, not a change to OrderBook.js's own
+   default rendering used everywhere else. */
+.hero-book-widget .depth-row.bid .depth-bar { opacity: 0.32; box-shadow: 0 0 16px 1px var(--bid); }
+.hero-book-widget .depth-row.ask .depth-bar { opacity: 0.32; box-shadow: 0 0 16px 1px var(--ask); }
+
+/* One glass bar with internal dividers, not 4 separately-bordered boxes
+   -- .stat-card's own border/radius/hover-lift are switched off here
+   (a card lifting alone would visually detach from the shared border
+   line its neighbors still sit on) in favor of a border-right divider
+   per column, dropped on the last one. */
+.landing-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; overflow: hidden; }
+.landing-stats .stat-card { background: transparent; border: none; border-radius: 0; border-right: 1px solid var(--border); }
+.landing-stats .stat-card:last-child { border-right: none; }
+.landing-stats .stat-card:hover { transform: none; }
+
+.landing-features { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
 .landing-modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
-.landing-proof { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+.landing-proof { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 14px; align-items: stretch; }
 
 /* Feature cards: click toggles the expanded state that reveals a real
    nav link (FeatureCard's f.link, in Landing.js) -- the hover glow and
@@ -971,18 +1043,49 @@ a:hover { text-decoration: underline; }
    -- this is landing-page UI state, NOT the real trading mode switch
    (that lives in ModeSwitcher.js, gated behind live-credential checks and
    only reachable once inside the app). Badges are the same real claims
-   already in each mode's body text, just surfaced as pills. */
-.mode-card { cursor: pointer; transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease; }
+   already in each mode's body text, just surfaced as pills, aligned to
+   the card's bottom edge via margin-top: auto on a flex column so every
+   card's badge row lines up regardless of body-text length. */
+.mode-card { cursor: pointer; transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease; display: flex; flex-direction: column; }
 .mode-card:hover { transform: translateY(-2px); }
 .mode-card.active { border-color: var(--cyber); box-shadow: 0 0 0 1px var(--cyber-dim), 0 0 28px var(--cyber-dim); }
+.mode-card-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 12px; }
 .mode-badge-pill {
   font-family: var(--font-mono); font-size: 10px; font-weight: 600;
   padding: 3px 8px; border-radius: 999px;
   color: var(--text-dim); background: var(--surface-2); border: 1px solid var(--border);
 }
 
+/* Throughput bar chart: 4 real THROUGHPUT_SCALING rows, bar height
+   proportional to that row's own real ops/sec (max-scaled), and each
+   bar doubles as BenchmarkExplorer's depth selector -- clicking a bar
+   IS clicking a real, measured data point, not a decorative chart next
+   to the real control. */
+.tp-bar-track { height: 90px; display: flex; align-items: flex-end; width: 100%; }
+.tp-bar { width: 100%; border-radius: 4px 4px 0 0; background: var(--accent-dim); transition: background 0.25s ease, box-shadow 0.25s ease; }
+.tp-bar.active { background: var(--accent-bright); box-shadow: 0 0 16px var(--accent-dim); }
+.tp-bar-col:hover .tp-bar:not(.active) { background: var(--accent); }
+
+/* Latency radar: bar width proportional to that op's own real p50
+   (max-scaled against the slowest real op, sweep). */
+.latency-bar-track { height: 6px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
+.latency-bar-fill { height: 100%; border-radius: 4px; background: linear-gradient(90deg, var(--cyber), var(--cyber-bright)); transition: width 0.4s ease; }
+
+/* Engine blueprint card: real architecture facts (README's own
+   "Core design" section), not a generic feature list -- a plain
+   label/detail row, no icons standing in for anything real. */
+.blueprint-row { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.blueprint-row:last-of-type { border-bottom: none; }
+.blueprint-label { font-weight: 600; font-size: 12.5px; white-space: nowrap; }
+.blueprint-detail { color: var(--text-faint); font-size: 11.5px; text-align: right; }
+
 @media (max-width: 900px) {
+  .landing-container { padding: 0 20px; }
+  .landing-section { margin-top: 56px; }
   .landing-title { font-size: 30px; }
+  .landing-hero-grid { grid-template-columns: minmax(0, 1fr); gap: 32px; padding-top: 56px; }
+  .landing-hero-left { text-align: center; }
+  .landing-sub-left { margin: 20px auto 0; }
   /* minmax(0, 1fr), not bare 1fr: a grid track's default min-width is
      auto (don't shrink below content), not 0 -- a bare `1fr` still lets
      a wide child (long text, a fixed-size chart) force the WHOLE grid,
@@ -991,6 +1094,8 @@ a:hover { text-decoration: underline; }
      track inside a 343px-wide mobile page. Applied uniformly below
      since every mobile single/double-column collapse has the same risk. */
   .landing-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .landing-stats .stat-card { border-right: none; border-bottom: 1px solid var(--border); }
+  .landing-stats .stat-card:nth-last-child(-n+2) { border-bottom: none; }
   .landing-features { grid-template-columns: minmax(0, 1fr); }
   .landing-modes { grid-template-columns: minmax(0, 1fr); }
   .landing-proof { grid-template-columns: minmax(0, 1fr); }
