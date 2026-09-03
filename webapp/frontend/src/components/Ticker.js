@@ -31,6 +31,16 @@ const LIVE_TICKER_STALE_THRESHOLD_MS = LIVE_TICKER_POLL_MS * 3;
 export function Ticker() {
   const [symbols, setSymbols] = React.useState([]);
   const [ticks, setTicks] = React.useState({});
+  // LIVE mode only -- the real previous close each live symbol's %-change
+  // is computed against (Quote.close, from Angel One's own real quote).
+  // Real bug this fixes (confirmed live, 2026-09-03): %-change used to be
+  // computed against s.reference_price (NAMED_INSTRUMENTS' static
+  // simulated seed price, e.g. ICICIBANK=1250) even in live mode, where
+  // `price` is a REAL Angel One number -- comparing a real live price
+  // against an unrelated simulated constant produced swings like -55%/
+  // +44% for perfectly ordinary real moves. See api.live.quotes' own
+  // comment and app/routers/live_market.py's get_live_quotes docstring.
+  const [liveCloses, setLiveCloses] = React.useState({});
   // Per-SYMBOL last-tick timestamp, not one shared flag: this component
   // holds N independent WebSocket subscriptions (one per instrument, via
   // the fan-out below), unlike Terminal.js/StatusBar.js which each watch
@@ -75,17 +85,23 @@ export function Ticker() {
       const liveNamedSymbols = namedSymbols.filter((s) => s.live_tradable);
       let cancelled = false;
       const poll = () => {
-        liveNamedSymbols.forEach((s) => {
-          api.live.history(s.symbol, "1m", 1)
-            .then((hist) => {
-              if (cancelled) return;
-              const last = hist.bars[hist.bars.length - 1];
-              if (!last) return; // no bar yet for this symbol -- leave its price as whatever it last was
-              setTicks((prev) => ({ ...prev, [s.symbol]: last.close }));
-              setLastUpdatedAt((prev) => ({ ...prev, [s.symbol]: Date.now() }));
-            })
-            .catch(() => {}); // one symbol's poll failing (e.g. no credential) shouldn't blank out the others
-        });
+        if (!liveNamedSymbols.length) return;
+        // ONE batched request for every live symbol, not one per symbol
+        // -- also gives real LTP + real previous close together, so this
+        // replaces the old per-symbol GET /live/market/history poll
+        // entirely rather than adding a second request alongside it.
+        api.live.quotes(liveNamedSymbols.map((s) => s.symbol))
+          .then((res) => {
+            if (cancelled) return;
+            const now = Date.now();
+            res.quotes.forEach((q) => {
+              if (q.ltp == null) return; // unresolvable or genuinely unquoted right now -- leave prior state as-is
+              setTicks((prev) => ({ ...prev, [q.symbol]: q.ltp }));
+              setLastUpdatedAt((prev) => ({ ...prev, [q.symbol]: now }));
+              if (q.close != null) setLiveCloses((prev) => ({ ...prev, [q.symbol]: q.close }));
+            });
+          })
+          .catch(() => {}); // e.g. no broker credential yet -- leave the strip showing whatever it last had
       };
       poll();
       const id = setInterval(poll, LIVE_TICKER_POLL_MS);
@@ -106,7 +122,13 @@ export function Ticker() {
   const staleThreshold = mode === "live" ? LIVE_TICKER_STALE_THRESHOLD_MS : DEFAULT_STALE_THRESHOLD_MS;
   const items = symbols.map((s) => {
     const price = ticks[s.symbol];
-    const pct = price != null ? ((price - s.reference_price) / s.reference_price) * 100 : null;
+    // Live mode's %-change is real-LTP-vs-real-previous-close
+    // (liveCloses, from api.live.quotes); paper/virtual's own price AND
+    // reference_price both come from the same simulated engine, so that
+    // comparison stays internally consistent as-is. Never fall back to
+    // s.reference_price for live -- that's the exact bug this fixes.
+    const reference = mode === "live" ? liveCloses[s.symbol] : s.reference_price;
+    const pct = price != null && reference ? ((price - reference) / reference) * 100 : null;
     const updatedAt = lastUpdatedAt[s.symbol];
     const stale = updatedAt === undefined || now - updatedAt > staleThreshold;
     return { symbol: s.symbol, price, pct, stale };

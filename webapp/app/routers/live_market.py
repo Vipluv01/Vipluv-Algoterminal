@@ -146,6 +146,73 @@ def get_live_history(
     return HistoryOut(symbol=symbol, interval=interval, requested_bars=limit, returned_bars=len(bars), bars=bars)
 
 
+class QuoteOut(BaseModel):
+    symbol: str
+    ltp: float | None
+    close: float | None  # real previous close from Angel One's own quote -- None if unresolvable/unquoted
+
+
+class QuotesOut(BaseModel):
+    quotes: list[QuoteOut]
+
+
+@router.get("/market/quotes", response_model=QuotesOut)
+def get_live_quotes(
+    symbols: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Real LTP + real previous close, batched -- what Ticker.js's daily
+    %-change display actually needs and GET /market/history (bars only,
+    no prev-close field) can't provide. This was the real bug behind a
+    live-mode ticker showing swings like -55%/+44%: with nothing else to
+    compare against, the frontend was computing %-change against
+    NAMED_INSTRUMENTS' static simulated seed price (app/markets.py's own
+    "illustrative... not a live quote" reference for PAPER mode) instead
+    of any real baseline -- comparing a real live price against an
+    unrelated constant from a different mode entirely. This endpoint
+    gives live mode its own real reference (Quote.close, from Angel
+    One's real getMarketData FULL-mode response) so %-change is
+    LTP-vs-real-previous-close, the same thing every real trading
+    screen means by "daily change."
+
+    `symbols` is comma-separated (not repeated query params) to keep
+    this a single request for the whole ticker strip, not one per
+    symbol -- exactly the batching lesson get_quote_batch's own
+    MAX_TOKENS_PER_BATCH history already established for the options
+    chain. One symbol failing to resolve (TATAMOTORS) must not blank the
+    other 6 real ones -- each symbol's own resolution is caught
+    independently, never propagated as a whole-request 502.
+    """
+    adapter = _get_adapter_or_400(db, user.id)
+    symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+
+    token_to_symbol: dict[str, str] = {}
+    unresolved: list[str] = []
+    for sym in symbol_list:
+        try:
+            match = adapter.resolve_equity_symbol("NSE", sym)
+        except AngelOneError:
+            unresolved.append(sym)
+            continue
+        token_to_symbol[match["symboltoken"]] = sym
+
+    quote_by_token = {}
+    if token_to_symbol:
+        try:
+            quote_by_token = adapter.get_quote_batch({"NSE": list(token_to_symbol)})
+        except AngelOneError as e:
+            raise HTTPException(status_code=502, detail=f"Angel One quote fetch failed: {e}")
+
+    quotes = []
+    for token, sym in token_to_symbol.items():
+        q = quote_by_token.get(token)
+        quotes.append(QuoteOut(symbol=sym, ltp=q.ltp if q else None, close=q.close if q else None))
+    for sym in unresolved:
+        quotes.append(QuoteOut(symbol=sym, ltp=None, close=None))
+    return QuotesOut(quotes=quotes)
+
+
 def _live_tick_to_payload(symbol: str, tick: dict) -> dict:
     """SmartWebSocketV2's own parsed tick dict (angelone.py's own
     docstring: field names confirmed from SDK source) -> the same tick

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from app.broker.angelone import AngelOneAuthError, AngelOneError
+from app.broker.angelone import AngelOneAuthError, AngelOneError, Quote
 
 
 class _StubAdapter:
@@ -156,3 +156,65 @@ def test_live_history_returns_a_clean_502_not_a_bare_500_when_symbol_lookup_fail
     resp = client.get("/live/market/history", params={"symbol": "RELIANCE"})
     assert resp.status_code == 502
     assert "Invalid TOTP" in resp.json()["detail"]
+
+
+class _QuotesStubAdapter:
+    """Per-symbol resolution + one get_quote_batch call, for GET
+    /live/market/quotes -- a separate stub from _StubAdapter above, whose
+    search_symbol_token ignores which symbol was actually asked for
+    (fine for that file's single-symbol tests, not for a real batch)."""
+
+    def __init__(self, *, resolvable, quotes_by_token):
+        self.resolvable = resolvable  # {symbol: symboltoken}
+        self.quotes_by_token = quotes_by_token  # {token: Quote}
+        self.last_quote_batch_tokens = None
+
+    def resolve_equity_symbol(self, exchange, symbol):
+        if symbol not in self.resolvable:
+            raise AngelOneError(f"could not resolve {symbol!r} to a standard NSE equity instrument")
+        return {"exchange": exchange, "tradingsymbol": f"{symbol}-EQ", "symboltoken": self.resolvable[symbol]}
+
+    def get_quote_batch(self, exchange_tokens):
+        self.last_quote_batch_tokens = exchange_tokens
+        return self.quotes_by_token
+
+
+def test_live_quotes_returns_real_ltp_and_close_for_resolvable_symbols(client, monkeypatch):
+    """Regression test for the real bug behind a live-mode ticker showing
+    swings like -55%/+44%: %-change needs a REAL reference (Quote.close),
+    not the simulated engine's static seed price -- this is the endpoint
+    that supplies it."""
+    stub = _QuotesStubAdapter(
+        resolvable={"RELIANCE": "2885", "ICICIBANK": "4963"},
+        quotes_by_token={
+            "2885": Quote(ltp=1430.0, close=1420.0, best_bid=1429.5, best_ask=1430.5),
+            "4963": Quote(ltp=1250.0, close=1245.0, best_bid=None, best_ask=None),
+        },
+    )
+    monkeypatch.setattr("app.routers.live_market.get_adapter_for_user", lambda db, user_id: stub)
+
+    resp = client.get("/live/market/quotes", params={"symbols": "RELIANCE,ICICIBANK"})
+    assert resp.status_code == 200, resp.text
+    by_symbol = {q["symbol"]: q for q in resp.json()["quotes"]}
+    assert by_symbol["RELIANCE"]["ltp"] == 1430.0
+    assert by_symbol["RELIANCE"]["close"] == 1420.0
+    assert by_symbol["ICICIBANK"]["close"] == 1245.0
+    assert stub.last_quote_batch_tokens == {"NSE": ["2885", "4963"]}
+
+
+def test_live_quotes_one_unresolvable_symbol_does_not_blank_the_others(client, monkeypatch):
+    """TATAMOTORS (zero real Angel One listings, confirmed live) must not
+    take down the rest of a real batch it happens to be requested
+    alongside."""
+    stub = _QuotesStubAdapter(
+        resolvable={"RELIANCE": "2885"},
+        quotes_by_token={"2885": Quote(ltp=1430.0, close=1420.0, best_bid=None, best_ask=None)},
+    )
+    monkeypatch.setattr("app.routers.live_market.get_adapter_for_user", lambda db, user_id: stub)
+
+    resp = client.get("/live/market/quotes", params={"symbols": "RELIANCE,TATAMOTORS"})
+    assert resp.status_code == 200, resp.text
+    by_symbol = {q["symbol"]: q for q in resp.json()["quotes"]}
+    assert by_symbol["RELIANCE"]["ltp"] == 1430.0
+    assert by_symbol["TATAMOTORS"]["ltp"] is None
+    assert by_symbol["TATAMOTORS"]["close"] is None
