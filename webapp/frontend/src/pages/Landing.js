@@ -60,6 +60,7 @@ export function Landing() {
 
   return html`
     <div class="landing-page">
+      <div class="landing-glow" />
       <nav class="topnav" style=${{ background: "transparent", backdropFilter: "none", borderBottom: "1px solid var(--border)" }}>
         <a href="#/" class="brand" style=${{ textDecoration: "none" }}>
           <span class="brand-mark">A</span><span>algoterminal</span>
