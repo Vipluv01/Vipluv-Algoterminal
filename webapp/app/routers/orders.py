@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.accounting import STARTING_VIRTUAL_CASH_DEFAULT, compute_account
 from app.auth import get_current_user
 from app.brackets import cancel_brackets_closed_elsewhere
 from app.broker.adapter_cache import IncompleteBrokerCredentialError, NoBrokerCredentialError, get_adapter_for_user
@@ -160,6 +161,42 @@ def submit_order(
         market = registry[body.symbol]
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+    # Buying-power check: reject a buy whose worst-case cost exceeds this
+    # account's actual cash, BEFORE it ever reaches the matching engine.
+    # Real bug this closes (confirmed live, 2026-09-03): nothing anywhere
+    # in this submission path checked cash at all -- paper mode's account
+    # (started at STARTING_PAPER_CASH_DEFAULT, ~Rs 1 lakh) had run to
+    # -Rs 53,54,333 after a long automated-strategy session, because every
+    # buy was accepted regardless of available capital. Scoped
+    # deliberately narrow: BUY orders only (a sell reduces an existing
+    # long or opens a short, neither of which spends cash the same simple
+    # way), and paper/virtual only (a live order never reaches the
+    # simulated engine at all -- Angel One's own real margin rules govern
+    # there, this app doesn't need to reimplement them). A market order's
+    # worst-case cost is estimated from the market's own current price
+    # (the real fill price isn't known until AFTER matching); a limit
+    # order can never fill above its own limit price, so that's exact,
+    # not an estimate.
+    if body.side == "buy":
+        starting_cash = STARTING_VIRTUAL_CASH_DEFAULT if mode_enum == Mode.virtual else None
+        existing_orders = db.query(Order).filter(
+            Order.user_id == user.id, Order.mode == mode_enum, Order.sub_account_id.is_(None),
+        ).all()
+        snapshot = compute_account(
+            existing_orders, registry.current_prices(), only_primary=True,
+            **({"starting_cash": starting_cash} if starting_cash is not None else {}),
+        )
+        est_px = body.px if body.order_type in ("limit", "stop_limit") else market.current_price
+        est_cost = body.qty * est_px
+        if est_cost > snapshot.cash:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Insufficient buying power: this order needs an estimated Rs {est_cost:,.2f} "
+                    f"but only Rs {snapshot.cash:,.2f} cash is available"
+                ),
+            )
 
     px_ticks = 0
     stop_px_ticks = 0

@@ -158,14 +158,24 @@ export const api = {
   leaderboard: (since) => request("GET", `/leaderboard${since ? `?since=${encodeURIComponent(since)}` : ""}`),
 
   portfolio: {
-    attribution: () => request("GET", "/portfolio/attribution"),
+    // mode is "paper"|"virtual" ONLY -- the backend rejects "live" (see
+    // app/routers/portfolio.py's get_attribution docstring: there is no
+    // real mark-to-market registry or benchmark price source for live
+    // positions yet). Real bug this closes (confirmed live, 2026-09-03):
+    // this call carried NO mode at all before, so the backend always
+    // queried Mode.paper regardless of which mode was actually selected
+    // -- Portfolio IQ silently showed paper's attribution/P&L under live
+    // mode, mislabeled as if it applied there. PortfolioIQ.js now shows
+    // an honest "not available in live mode yet" state for live instead
+    // of calling this at all.
+    attribution: (mode) => request("GET", `/portfolio/attribution?mode=${mode}`),
     // Deliberately "realized-pnl-curve" / `realized_pnl`, not "equity-curve"
     // / `equity" -- see app/routers/portfolio.py's RealizedPnlPointOut
     // docstring. This is a REALIZED-only walk (for clean Brinson attribution
     // periods); GET /account/equity-curve (api.equityCurve() above) is the
     // genuine mark-to-market curve. Do not rename either back to "equity"
     // on this side, or the two charts read as disagreeing again.
-    realizedPnlCurve: () => request("GET", "/portfolio/realized-pnl-curve"),
+    realizedPnlCurve: (mode) => request("GET", `/portfolio/realized-pnl-curve?mode=${mode}`),
     subAccounts: () => request("GET", "/portfolio/sub-accounts"),
   },
 
@@ -211,6 +221,15 @@ export const api = {
   live: {
     history: (symbol, interval, limit) =>
       request("GET", `/live/market/history?symbol=${encodeURIComponent(symbol)}&interval=${interval}${limit ? `&limit=${limit}` : ""}`),
+    // Real LTP + real previous close, batched into ONE request for
+    // however many symbols Ticker.js asks for -- see app/routers/
+    // live_market.py's get_live_quotes docstring on the real bug this
+    // exists to fix (a live-mode %-change comparing a real price against
+    // the SIMULATED engine's static seed reference_price). `symbols` is
+    // an array here; joined into one comma-separated param, not N
+    // separate requests -- the same batching lesson get_quote_batch's
+    // own MAX_TOKENS_PER_BATCH already established.
+    quotes: (symbols) => request("GET", `/live/market/quotes?symbols=${encodeURIComponent(symbols.join(","))}`),
     // Real Angel One options chain (app/routers/live_options.py) -- a
     // completely separate universe/shape from `options` above (221 real
     // underlyings vs. the synthetic 9-symbol chain, real bid/ask/LTP vs.

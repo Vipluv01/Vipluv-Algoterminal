@@ -8,6 +8,7 @@ import { MultiLineChart } from "../components/MultiLineChart.js";
 import { ErrorBoundary } from "../components/ErrorBoundary.js";
 import { EmptyState } from "../components/EmptyState.js";
 import { inr, pnl, pnlClass, pct, dash } from "../format.js";
+import { useMode } from "../mode.js";
 
 function StatCard({ label, value, valueClass = "" }) {
   return html`
@@ -18,21 +19,44 @@ function StatCard({ label, value, valueClass = "" }) {
   `;
 }
 
-function usePanel(fetchFn) {
+// deps defaults to [] (fetch once, matching the original behavior every
+// existing caller relied on); AttributionPanel/RealizedPnlPanel below
+// pass [mode] so switching trading modes re-fetches instead of leaving
+// the PREVIOUS mode's numbers on screen -- see this file's own module-
+// level note on the real bug (paper's data silently shown under any
+// mode) this whole file's mode-awareness pass fixes.
+function usePanel(fetchFn, deps = []) {
   const [data, setData] = React.useState(null);
   const [error, setError] = React.useState(null);
   const load = React.useCallback(() => {
+    setData(null); // forces the skeleton back on a mode change, not the previous mode's stale numbers
     setError(null);
     fetchFn().then(setData).catch((e) => setError(e.message || "Could not load"));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, deps);
   React.useEffect(() => { load(); }, [load]);
   return { data, error, load };
 }
 
-function AttributionPanel() {
-  const { data, error, load } = usePanel(api.portfolio.attribution);
+// Real bug fixed here (confirmed live, 2026-09-03): GET /portfolio/
+// attribution and /portfolio/realized-pnl-curve carried no mode at all
+// before, so the backend always queried Mode.paper -- this page silently
+// showed paper's accumulated attribution/P&L/fill count under LIVE mode
+// too, mislabeled as if it were the live account's own numbers (a real
+// "shows profit in a mode with none" report). "live" is not a value the
+// backend even accepts for these two (there is no real mark-to-market
+// registry or live benchmark price source built yet -- see portfolio.py's
+// own docstring) -- shown here as an honest "not available yet" instead
+// of silently substituting a different mode's data, the same pattern
+// AccountPanel.js already established for GET /account's paper-only scope.
+function LiveModeNotAvailable() {
+  return html`<${EmptyState} message="Portfolio IQ isn't wired up to real live positions yet -- this view only covers paper and virtual mode so far." />`;
+}
 
+function AttributionPanel({ mode }) {
+  const { data, error, load } = usePanel(() => api.portfolio.attribution(mode), [mode]);
+
+  if (mode === "live") return html`<${LiveModeNotAvailable} />`;
   if (data === null && !error) return html`<div class="skeleton" style=${{ height: "260px" }} />`;
   if (error) return html`
     <div class="error-state">
@@ -65,9 +89,10 @@ function AttributionPanel() {
   `;
 }
 
-function RealizedPnlPanel() {
-  const { data, error, load } = usePanel(api.portfolio.realizedPnlCurve);
+function RealizedPnlPanel({ mode }) {
+  const { data, error, load } = usePanel(() => api.portfolio.realizedPnlCurve(mode), [mode]);
 
+  if (mode === "live") return html`<${LiveModeNotAvailable} />`;
   if (data === null && !error) return html`<div class="skeleton" style=${{ height: "260px" }} />`;
   if (error) return html`
     <div class="error-state">
@@ -121,25 +146,29 @@ function SubAccountsPanel() {
 }
 
 export function PortfolioIQ() {
+  const mode = useMode();
   return html`
     <div class="page fade-in">
       <div style=${{ marginBottom: "20px" }}>
         <h1 style=${{ margin: "0 0 4px", fontSize: "20px", fontWeight: 800, letterSpacing: "-0.01em" }}>Portfolio IQ</h1>
-        <div style=${{ color: "var(--text-faint)", fontSize: "12px" }}>Attribution against a named benchmark, the realized P&L walk, and the sub-account breakdown.</div>
+        <div style=${{ color: "var(--text-faint)", fontSize: "12px" }}>
+          Attribution against a named benchmark, the realized P&L walk, and the sub-account breakdown --
+          scoped to whichever mode is active (${mode}).
+        </div>
       </div>
 
       <div class="panel panel-pad" style=${{ marginBottom: "16px" }}>
         <div class="panel-title">Attribution</div>
-        <${ErrorBoundary} label="Attribution"><${AttributionPanel} /><//>
+        <${ErrorBoundary} label="Attribution"><${AttributionPanel} mode=${mode} /><//>
       </div>
 
       <div class="panel panel-pad" style=${{ marginBottom: "16px" }}>
         <div class="panel-title">Realized P&L</div>
-        <${ErrorBoundary} label="Realized P&L"><${RealizedPnlPanel} /><//>
+        <${ErrorBoundary} label="Realized P&L"><${RealizedPnlPanel} mode=${mode} /><//>
       </div>
 
       <div class="panel panel-pad">
-        <div class="panel-title">Sub-Accounts</div>
+        <div class="panel-title">Sub-Accounts (paper mode only)</div>
         <${ErrorBoundary} label="Sub-Accounts"><${SubAccountsPanel} /><//>
       </div>
     </div>
