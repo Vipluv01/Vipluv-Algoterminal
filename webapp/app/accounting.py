@@ -425,6 +425,73 @@ def compute_realizations(orders: list[Order], starting_cash: float = STARTING_PA
     return _walk_fills(orders, starting_cash).realizations
 
 
+@dataclass
+class _RealizationsCacheEntry:
+    """Same shape of problem as _WalkState/get_cached_account_snapshot,
+    for a different consumer: dashboard_stats.compute_trade_stats and
+    compute_day_stats both need every realized close/reduce/flip EVER, not
+    just a terminal number, so unlike _WalkState this cache's own output
+    (`realizations`) genuinely does grow one entry per realizing fill,
+    forever. That's fine here specifically because neither consumer cares
+    about insertion order (compute_trade_stats only sums/counts;
+    compute_day_stats buckets by day and re-sorts) -- so this only has to
+    get the WALK right, via the same `state`/_apply_fill pair
+    get_cached_account_snapshot already uses, and can just append."""
+    state: _WalkState
+    realizations: list[TradeRealization] = field(default_factory=list)
+
+
+_realizations_cache: dict[tuple[int, Mode], _RealizationsCacheEntry] = {}
+_realizations_cache_lock = threading.Lock()
+
+
+def get_cached_realizations(
+    db: Session, user_id: int, mode: Mode, starting_cash: float = STARTING_PAPER_CASH_DEFAULT,
+) -> list[TradeRealization]:
+    """Incremental counterpart to compute_realizations, same fix as
+    get_cached_account_snapshot and for the same reason: GET /dashboard/
+    stats and GET /dashboard/calendar (app/routers/dashboard.py) each
+    independently fetched every order for this user/mode and re-walked it
+    from scratch on every call -- confirmed live, 2026-09-04, ~2.4s each
+    against the real 107,651-order paper account, ~4.8s combined since
+    Dashboard.js fetches both on every page load. Deliberately NOT scoped
+    by sub_account_id/only_primary -- dashboard.py's own queries never
+    filtered on those either, so this keeps that exact existing scope
+    rather than quietly narrowing it.
+
+    Keyed by (user_id, mode) only, a separate cache from
+    _account_cache -- this one grows an unbounded list on purpose (see
+    _RealizationsCacheEntry's own docstring), so it deliberately isn't
+    folded into the bounded _WalkState cache above."""
+    key = (user_id, mode)
+    with _realizations_cache_lock:
+        entry = _realizations_cache.get(key)
+        if entry is not None and entry.state.last_order_id:
+            # Same staleness guard as get_cached_account_snapshot, and for
+            # the same real reason -- see that function's own comment.
+            watermark_still_exists = db.query(Order.id).filter(Order.id == entry.state.last_order_id).first()
+            if watermark_still_exists is None:
+                entry = None
+        if entry is None:
+            entry = _RealizationsCacheEntry(state=_WalkState(cash=starting_cash))
+
+        query = db.query(Order).filter(Order.user_id == user_id, Order.mode == mode)
+        if entry.state.last_order_id:
+            query = query.filter(Order.id > entry.state.last_order_id)
+
+        new_orders = _filled_orders_only(query.order_by(Order.id).all())
+        for o in new_orders:
+            realized_amount = _apply_fill(entry.state, o)
+            if realized_amount is not None:
+                entry.realizations.append(TradeRealization(
+                    order_id=o.id, symbol=o.symbol, strategy_key=o.strategy_key,
+                    amount=realized_amount, created_at=o.created_at,
+                ))
+
+        _realizations_cache[key] = entry
+        return list(entry.realizations)
+
+
 def compute_realized_pnl_curve(
     orders: list[Order], starting_cash: float = STARTING_PAPER_CASH_DEFAULT,
 ) -> list[RealizedPnlPoint]:
