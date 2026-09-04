@@ -10,8 +10,20 @@ const STRATEGY_BLURBS = {
   pairs_cointegration: "Trades the ICICIBANK/HDFCBANK spread back to equilibrium via Engle-Granger cointegration and a Kalman-filtered hedge ratio — validated methodology from icici_mean_reversion (Sharpe 1.74 backtested).",
 };
 
+// Real bug fixed 2026-09-04, found live via a Playwright walkthrough:
+// this card used to branch on `!isPairs` alone, so an OPTIONS strategy
+// (iron_condor, calendar_spread, ...) fell into the same "editable"
+// branch a single-instrument strategy does -- an editable Symbol
+// dropdown a user could believe actually retargeted the strategy, and a
+// "Single Instrument" badge that was simply wrong for a multi-leg
+// options strategy. The backend already silently ignored whatever
+// symbol got submitted for options (routers/strategies.py's
+// set_allocation), so this was misleading UI, not a broken trade -- but
+// still exactly the kind of "looks configurable, isn't" gap worth
+// fixing. Branches on strategy.kind directly now, one real case per kind.
 function StrategyCard({ strategy, allocation, symbolOptions, onSave }) {
-  const isPairs = strategy.kind === "pairs";
+  const isSingleInstrument = strategy.kind === "single_instrument";
+  const kindLabel = strategy.kind === "pairs" ? "Pairs" : strategy.kind === "options" ? "Options" : "Single Instrument";
   const [enabled, setEnabled] = React.useState(allocation?.enabled ?? false);
   const [symbol, setSymbol] = React.useState(allocation?.symbol ?? symbolOptions[0]);
   const [weight, setWeight] = React.useState(allocation?.weight ?? 0.5);
@@ -21,7 +33,7 @@ function StrategyCard({ strategy, allocation, symbolOptions, onSave }) {
   async function save(nextEnabled) {
     setSaving(true);
     try {
-      await onSave(strategy.key, { enabled: nextEnabled, symbol: isPairs ? null : symbol, weight: Number(weight) });
+      await onSave(strategy.key, { enabled: nextEnabled, symbol: isSingleInstrument ? symbol : null, weight: Number(weight) });
       setEnabled(nextEnabled);
     } catch (e) {
       toast(e.message || "Could not update strategy", "err");
@@ -35,26 +47,29 @@ function StrategyCard({ strategy, allocation, symbolOptions, onSave }) {
       <div style=${{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "10px" }}>
         <div>
           <div style=${{ fontWeight: 700, fontSize: "14px" }}>${strategy.name}</div>
-          <span class=${`badge ${isPairs ? "badge-accent" : "badge-off"}`} style=${{ marginTop: "6px" }}>${isPairs ? "Pairs" : "Single Instrument"}</span>
+          <span class=${`badge ${isSingleInstrument ? "badge-off" : "badge-accent"}`} style=${{ marginTop: "6px" }}>${kindLabel}</span>
         </div>
         <span class=${`badge ${enabled ? "badge-live" : "badge-off"}`}>${enabled ? "● Running" : "Off"}</span>
       </div>
       <p style=${{ color: "var(--text-dim)", fontSize: "12.5px", lineHeight: 1.5, margin: "0 0 14px" }}>${STRATEGY_BLURBS[strategy.key] || ""}</p>
 
-      ${!isPairs && html`
-        <div class="field">
-          <label>Symbol</label>
-          <select class="input" value=${symbol} onChange=${(e) => setSymbol(e.target.value)} disabled=${enabled}>
-            ${symbolOptions.map((s) => html`<option key=${s} value=${s}>${s}</option>`)}
-          </select>
-        </div>
-      `}
-      ${isPairs && html`
-        <div class="field">
-          <label>Pair</label>
-          <div class="input" style=${{ color: "var(--text-dim)" }}>ICICIBANK / HDFCBANK (fixed — the only pair with validated cointegration evidence)</div>
-        </div>
-      `}
+      ${isSingleInstrument
+        ? html`
+          <div class="field">
+            <label>Symbol</label>
+            <select class="input" value=${symbol} onChange=${(e) => setSymbol(e.target.value)} disabled=${enabled}>
+              ${symbolOptions.map((s) => html`<option key=${s} value=${s}>${s}</option>`)}
+            </select>
+          </div>
+        `
+        : html`
+          <div class="field">
+            <label>${strategy.kind === "pairs" ? "Pair" : "Underlying"}</label>
+            <div class="input" style=${{ color: "var(--text-dim)" }}>
+              ${strategy.fixed_underlying} (fixed — ${strategy.kind === "pairs" ? "the only pair with validated cointegration evidence" : "not user-configurable for this strategy"})
+            </div>
+          </div>
+        `}
 
       <div class="field">
         <label>Weight (informational — portfolio optimizer target)</label>

@@ -2,7 +2,7 @@ import React from "react";
 import { html } from "../html.js";
 import { api } from "../api.js";
 import { useToast } from "../toast.js";
-import { refreshRiskStatus } from "../riskStatus.js";
+import { refreshRiskStatus, useTradingHalted } from "../riskStatus.js";
 
 // {key, label, body, decimals?, isPercent?} -- every field
 // RiskControlsUpdate (app/routers/risk.py) actually accepts, editable here.
@@ -53,11 +53,30 @@ export function Risk() {
   const [confirmingClearHalt, setConfirmingClearHalt] = React.useState(false);
   const [clearingHalt, setClearingHalt] = React.useState(false);
   const toast = useToast();
+  // Real bug found live via a Playwright walkthrough, 2026-09-04: this
+  // page's own halted badge/button read risk.trading_halted, a value
+  // fetched ONCE on mount and only ever updated by THIS page's own
+  // resetHalt() call -- clearing the halt from App.js's global banner
+  // instead (a different component instance) left this page stuck
+  // showing "HALTED" with a "Clear Halt" button that no longer did
+  // anything meaningful, even though the halt was genuinely cleared
+  // (confirmed: the global banner disappeared, the toast fired, GET
+  // /risk really did return trading_halted=false). riskStatus.js's own
+  // useTradingHalted() is the SAME shared, polled store the banner reads
+  // from -- driving the badge/button off that instead of the one-shot
+  // `risk` fetch keeps this page in sync with a halt cleared (or
+  // tripped) from anywhere, not just from here.
+  const halted = useTradingHalted();
 
   const load = React.useCallback(() => {
     api.risk.get().then((r) => { setRisk(r); setEdits({}); });
   }, []);
   React.useEffect(() => { load(); }, [load]);
+  // If the halt was cleared elsewhere while this page had the
+  // confirmation step open, that confirmation is now stale -- drop back
+  // to the plain (now hidden, since !halted) state rather than leaving
+  // "Confirm Clear" sitting there for an action that already happened.
+  React.useEffect(() => { if (!halted) setConfirmingClearHalt(false); }, [halted]);
 
   function editValueFor(field) {
     if (field.key in edits) return edits[field.key];
@@ -115,13 +134,13 @@ export function Risk() {
         </div>
         ${risk && html`
           <div style=${{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <span class=${`badge ${risk.trading_halted ? "badge-off" : "badge-live"}`}>
-              ${risk.trading_halted ? "● CIRCUIT BREAKER: HALTED" : "● CIRCUIT BREAKER: ARMED"}
+            <span class=${`badge ${halted ? "badge-off" : "badge-live"}`}>
+              ${halted ? "● CIRCUIT BREAKER: HALTED" : "● CIRCUIT BREAKER: ARMED"}
             </span>
-            ${risk.trading_halted && !confirmingClearHalt && html`
+            ${halted && !confirmingClearHalt && html`
               <button class="btn btn-sm" onClick=${() => setConfirmingClearHalt(true)}>Clear Halt</button>
             `}
-            ${risk.trading_halted && confirmingClearHalt && html`
+            ${halted && confirmingClearHalt && html`
               <${React.Fragment}>
                 <span style=${{ fontSize: "11.5px", color: "var(--text-dim)" }}>Clear every restriction this halt imposed?</span>
                 <button class="btn btn-sm btn-sell" disabled=${clearingHalt} onClick=${resetHalt}>
