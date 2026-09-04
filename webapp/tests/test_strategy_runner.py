@@ -218,6 +218,50 @@ def test_pairs_close_leaves_entry_zscore_null(db, registry, user, monkeypatch):
     assert len(closing_orders) == 2  # the stop-loss close, both legs
 
 
+def test_current_pair_position_updates_incrementally_across_multiple_calls(db, user):
+    """compute_pair_position_state (app/pairs_service.py) is now an
+    incremental, cached walk -- same latency fix as accounting.
+    get_cached_account_snapshot, since this function is called from the
+    tick loop every second AND from routers/pairs.py's read-only pages,
+    polled every 5s. This drives it across three separate calls with new
+    orders inserted between each, confirming a repeat call correctly
+    folds in only what's new rather than either double-counting or
+    silently dropping fills that arrived after the first call cached
+    something."""
+    def _fill(side, qty, minute):
+        db.add(Order(
+            user_id=user.id, mode=Mode.paper, strategy_key=sr.PAIRS_STRATEGY_KEY,
+            symbol=sr.PAIRS_SYMBOL_A, side=side, order_type=OrderType.market, qty=qty,
+            status=OrderStatus.filled, filled_qty=qty, avg_fill_px=1250.0,
+            created_at=datetime(2026, 1, 1, 10, minute, tzinfo=timezone.utc),
+        ))
+        db.commit()
+
+    _fill(Side.buy, 10, 0)
+    state1 = current_pair_position(db, user.id)
+    assert state1 == "long_spread"
+
+    _fill(Side.buy, 5, 1)  # adds -> still long, now 15
+    state2 = current_pair_position(db, user.id)
+    assert state2 == "long_spread"
+
+    _fill(Side.sell, 20, 2)  # flips through flat -> short 5
+    state3 = current_pair_position(db, user.id)
+    assert state3 == "short_spread"
+
+    # Cross-check against a from-scratch computation over ALL orders --
+    # the incremental cache must agree with what a full walk would say.
+    from app.pairs_service import PairPositionState, compute_pair_position_state
+    all_orders = (
+        db.query(Order)
+        .filter(Order.user_id == user.id, Order.strategy_key == sr.PAIRS_STRATEGY_KEY, Order.mode == Mode.paper)
+        .all()
+    )
+    net_a = sum((o.filled_qty if o.side == Side.buy else -o.filled_qty) for o in all_orders if o.symbol == sr.PAIRS_SYMBOL_A)
+    expected = PairPositionState(position="short_spread", qty_a=abs(net_a))
+    assert compute_pair_position_state(db, user.id) == expected
+
+
 def test_current_pair_position_ignores_orders_from_a_different_strategy(db, user):
     """A manual trade or a different strategy's fill on the same symbol
     must not be mistaken for this strategy's own open spread position."""

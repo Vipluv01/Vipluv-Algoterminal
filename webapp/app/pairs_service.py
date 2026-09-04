@@ -28,7 +28,8 @@ split it out into its own module.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -151,6 +152,33 @@ class PairPositionState:
     qty_a: int      # ABSOLUTE held quantity on symbol_a, 0 when flat
 
 
+@dataclass
+class _PairPositionCacheEntry:
+    """Bounded, resumable state for compute_pair_position_state's own
+    incremental cache below -- just the running signed sum on symbol_a
+    plus the watermark it was folded in through, not a full accounting
+    walk (this function never needed avg-entry-price/realized-P&L, only
+    "how many shares of symbol_a, net, has this strategy filled").
+    """
+    net_a: int = 0
+    last_order_id: int = 0
+
+
+# Keyed by (user_id, strategy_key, symbol_a) -- process-local, same scope
+# as every other cache in this app (app/accounting.py's own
+# get_cached_account_snapshot, app/broker/adapter_cache.py). Confirmed
+# live, 2026-09-04: this function is called from BOTH the tick loop
+# (strategy_runner.py's run_strategies_once, once per second for every
+# active pairs-shaped allocation) and routers/pairs.py's read-only Pair
+# Overview/Analytics pages (polled every 5s) -- a fresh
+# db.query(Order)...all() + Python-side sum on every one of those calls
+# was a real, continuously-paid cost on the SAME strategy_key-tagged
+# order history GET /account's own latency fix (2026-09-04) already
+# solved for the primary account view, just not for this one.
+_pair_position_cache: dict[tuple[int, str, str], _PairPositionCacheEntry] = {}
+_pair_position_cache_lock = threading.Lock()
+
+
 def compute_pair_position_state(
     db: Session, user_id: int, *, strategy_key: str = PAIRS_STRATEGY_KEY, symbol_a: str = PAIRS_SYMBOL_A,
 ) -> PairPositionState:
@@ -166,15 +194,51 @@ def compute_pair_position_state(
     never be mistaken for another's, the same isolation
     routers/pairs.py's _open_legs already relies on for manual trades vs.
     strategy fills.
+
+    Incremental, same shape as accounting.get_cached_account_snapshot:
+    only orders with id > the last one already folded in are fetched on a
+    repeat call, and a plain running sum (not the full weighted-average-
+    cost walk _apply_fill does) is all this ever needed, since a pairs
+    position is always entered/closed in full round-trip-sized clips, not
+    scaled in and out the way a single-instrument position can be.
+    id (not created_at) as the watermark/fetch order is safe here for the
+    same reason it already is elsewhere: summation doesn't care what
+    order the terms arrive in, only that none are double-counted or
+    skipped, and id is DB-assigned monotonically with insertion order in
+    this app's single-writer session model.
     """
-    orders = (
-        db.query(Order)
-        .filter(Order.user_id == user_id, Order.strategy_key == strategy_key,
-                Order.mode == Mode.paper, Order.status.in_([OrderStatus.filled, OrderStatus.partially_filled]))
-        .order_by(Order.created_at)
-        .all()
-    )
-    net_a = sum((o.filled_qty if o.side == Side.buy else -o.filled_qty) for o in orders if o.symbol == symbol_a)
+    key = (user_id, strategy_key, symbol_a)
+    with _pair_position_cache_lock:
+        entry = _pair_position_cache.get(key)
+        base_query = db.query(Order).filter(
+            Order.user_id == user_id, Order.strategy_key == strategy_key,
+            Order.mode == Mode.paper, Order.status.in_([OrderStatus.filled, OrderStatus.partially_filled]),
+        )
+
+        if entry is not None and entry.last_order_id:
+            # Same staleness guard as accounting.get_cached_account_
+            # snapshot, scoped through base_query for the same reason --
+            # see that function's own comment on why a bare Order.id ==
+            # ... lookup isn't enough (a fresh test database, or a
+            # different user/strategy_key, can satisfy it by coincidence).
+            watermark_still_exists = base_query.filter(Order.id == entry.last_order_id).first()
+            if watermark_still_exists is None:
+                entry = None
+        if entry is None:
+            entry = _PairPositionCacheEntry()
+
+        query = base_query
+        if entry.last_order_id:
+            query = query.filter(Order.id > entry.last_order_id)
+
+        for o in query.order_by(Order.id).all():
+            if o.symbol == symbol_a:
+                entry.net_a += o.filled_qty if o.side == Side.buy else -o.filled_qty
+            entry.last_order_id = o.id
+
+        _pair_position_cache[key] = entry
+        net_a = entry.net_a
+
     if net_a > 0:
         return PairPositionState(position="long_spread", qty_a=net_a)
     if net_a < 0:

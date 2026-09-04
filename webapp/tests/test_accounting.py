@@ -493,6 +493,33 @@ def test_get_cached_account_snapshot_rejects_conflicting_filters(db, user):
         get_cached_account_snapshot(db, user.id, Mode.paper, {}, sub_account_id=1, only_primary=True)
 
 
+def test_get_cached_account_snapshot_strategy_key_filter_isolates_from_manual_trades(db, user):
+    """strategy_key, added 2026-09-04 for app/pairs_service.py's own
+    _open_legs (Pair Overview/Analytics, polled every 5s -- previously an
+    uncached compute_account walk on every call), scopes the walk to just
+    that strategy's own tagged fills. A manual (strategy_key=None) trade
+    on the same symbol must not be mistaken for the strategy's own
+    position -- same isolation compute_pair_position_state's own
+    "ignores orders from a different strategy" test already covers for
+    pairs_service.py's separate, lighter-weight cache."""
+    orders = [
+        _db_order(user.id, "RELIANCE", Side.buy, 10, 2900.0, minutes_after_t0=0),
+    ]
+    orders[0].strategy_key = "some_strategy"
+    manual = _db_order(user.id, "RELIANCE", Side.buy, 4, 2900.0, minutes_after_t0=1)
+    for o in orders + [manual]:
+        db.add(o)
+    db.commit()
+
+    strategy_snapshot = get_cached_account_snapshot(
+        db, user.id, Mode.paper, {"RELIANCE": 2900.0}, starting_cash=0.0, strategy_key="some_strategy",
+    )
+    assert strategy_snapshot.positions["RELIANCE"].qty == 10, "must include only the strategy-tagged fill, not the manual one"
+
+    unfiltered_snapshot = get_cached_account_snapshot(db, user.id, Mode.paper, {"RELIANCE": 2900.0})
+    assert unfiltered_snapshot.positions["RELIANCE"].qty == 14, "the default (no strategy_key) view is unaffected -- it still sees every order"
+
+
 def test_cached_snapshot_rebuilds_when_its_watermark_order_no_longer_exists(db, user):
     """Regression test for a real bug this cache's own test suite hit
     immediately: _account_cache is process-global (by design -- see its
@@ -515,7 +542,7 @@ def test_cached_snapshot_rebuilds_when_its_watermark_order_no_longer_exists(db, 
     # Forge exactly what a stale cache from a DIFFERENT, now-gone database
     # looks like: a watermark pointing at an order id this DB has never
     # had.
-    key = (user.id, Mode.paper, None, False)
+    key = (user.id, Mode.paper, None, False, None)
     _account_cache[key].last_order_id = 999_999
 
     fresh_order = _db_order(user.id, "TCS", Side.sell, 3, 4000.0, minutes_after_t0=1)
@@ -552,7 +579,7 @@ def test_cached_snapshot_rebuilds_when_the_watermark_id_belongs_to_a_different_m
     # apart: an unscoped staleness check would wrongly treat this as
     # still valid and let the forged RELIANCE position leak straight into
     # the snapshot; a properly scoped one discards it and rebuilds clean.
-    key = (user.id, Mode.paper, None, False)
+    key = (user.id, Mode.paper, None, False, None)
     _account_cache[key] = _WalkState(
         cash=100_000.0 - 10 * 2900.0, qty={"RELIANCE": 10}, avg_px={"RELIANCE": 2900.0},
         last_order_id=virtual_order.id,

@@ -1,4 +1,4 @@
-"""Builds per-strategy DAILY return series from real filled Order history --
+"""Builds per-strategy DAILY return series from real realized-P&L events --
 the raw material max_sharpe_allocation (app/portfolio_optimizer.py) needs,
 which nothing else in the codebase already produces: app/dashboard_stats.py
 groups realizations by day OR by strategy, never both together, and never
@@ -13,8 +13,7 @@ from datetime import date
 
 import numpy as np
 
-from app.accounting import STARTING_PAPER_CASH_DEFAULT, compute_realizations
-from app.models.trading import Order
+from app.accounting import STARTING_PAPER_CASH_DEFAULT, TradeRealization
 
 # Below this many distinct trading days across the active strategies, a
 # Sharpe estimate is noise, not a signal -- max_sharpe_allocation itself
@@ -25,7 +24,8 @@ MIN_TRADING_DAYS = 5
 
 
 def build_daily_return_series(
-    orders: list[Order], strategy_keys: list[str], *, starting_cash: float = STARTING_PAPER_CASH_DEFAULT,
+    realizations: list[TradeRealization], strategy_keys: list[str],
+    *, starting_cash: float = STARTING_PAPER_CASH_DEFAULT,
 ) -> dict[str, np.ndarray] | None:
     """Returns {strategy_key: daily_return_array}, every array aligned to
     the same sorted calendar dates and zero-filled on days a strategy had
@@ -33,9 +33,17 @@ def build_daily_return_series(
     (fewer than 2 strategies with any realized trade at all, or fewer than
     MIN_TRADING_DAYS distinct days across them) for a Sharpe estimate to
     mean anything.
-    """
-    realizations = compute_realizations(orders, starting_cash)
 
+    Takes realizations directly (not raw orders + starting_cash to walk
+    itself) so a caller with an already-computed list -- GET /optimizer
+    uses app.accounting.get_cached_realizations, the same incremental
+    cache GET /dashboard/stats uses, rather than re-walking this user's
+    entire order history from scratch on every request -- doesn't pay for
+    a second, redundant walk here. starting_cash is still needed on its
+    own: it's the denominator each day's raw rupee P&L is normalized by
+    to get a return, a separate concern from how the realizations
+    themselves were produced.
+    """
     by_strategy_day: dict[str, dict[date, float]] = defaultdict(lambda: defaultdict(float))
     for r in realizations:
         if r.strategy_key not in strategy_keys:

@@ -36,8 +36,48 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.accounting import (
+    _account_cache,
+    _equity_curve_cache,
+    _realizations_cache,
+    _realized_pnl_curve_cache,
+)
 from app.db import Base, get_db
 from app.main import app
+from app.pairs_service import _pair_position_cache
+
+
+@pytest.fixture(autouse=True)
+def _clear_process_global_caches():
+    """Every incremental accounting/pairs cache in this app is process-
+    global BY DESIGN (a small, single-process deployment -- see
+    accounting.get_cached_account_snapshot's own docstring), keyed by
+    things like (user_id, mode) that assume ids are unique and monotonic
+    within ONE persistent database, which is true in real production but
+    NOT across this test suite's own tests: every `client`/`db` fixture
+    stands up its own fresh in-memory SQLite database, and small ids
+    (1, 2, 3...) routinely repeat across tests for a completely different
+    user or order. A cache's own staleness check (verifying a watermark
+    order still exists) cannot tell "the same order" apart from "a
+    different database's different order that happens to reuse the same
+    id" -- confirmed live: exactly this coincidence let one test's cached
+    pair-position state leak into another's (test_strategy_runner.py) and
+    one mode's cached data leak into another's (test_portfolio_api.py)
+    before this fixture existed. Clearing every cache before AND after
+    each test is the actual fix -- not a smarter per-check heuristic,
+    since the ids genuinely can collide with no way to tell from data
+    alone."""
+    _account_cache.clear()
+    _realizations_cache.clear()
+    _realized_pnl_curve_cache.clear()
+    _equity_curve_cache.clear()
+    _pair_position_cache.clear()
+    yield
+    _account_cache.clear()
+    _realizations_cache.clear()
+    _realized_pnl_curve_cache.clear()
+    _equity_curve_cache.clear()
+    _pair_position_cache.clear()
 
 
 @pytest.fixture

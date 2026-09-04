@@ -334,14 +334,14 @@ def _snapshot_from_walk_core(
 # new orders on top of it independently, and each write back their own
 # now-diverged copy, silently corrupting the cached state for every
 # subsequent caller.
-_account_cache: dict[tuple[int, Mode, int | None, bool], _WalkState] = {}
+_account_cache: dict[tuple[int, Mode, int | None, bool, str | None], _WalkState] = {}
 _account_cache_lock = threading.Lock()
 
 
 def get_cached_account_snapshot(
     db: Session, user_id: int, mode: Mode, current_prices: dict[str, float],
     starting_cash: float = STARTING_PAPER_CASH_DEFAULT,
-    *, sub_account_id: int | None = None, only_primary: bool = False,
+    *, sub_account_id: int | None = None, only_primary: bool = False, strategy_key: str | None = None,
 ) -> AccountSnapshot:
     """Same real output as compute_account(<every order for this user/
     mode>, ...), but doesn't re-fetch and re-walk the user's ENTIRE order
@@ -352,11 +352,20 @@ def get_cached_account_snapshot(
     walk itself even starts, and that cost was paid again in full on
     every poll, forever, only growing as the account kept trading.
 
+    strategy_key, when given, scopes the walk to just that strategy's own
+    tagged fills -- added 2026-09-04 for app/pairs_service.py's own
+    _open_legs, which previously ran its own uncached compute_account
+    walk over the pairs strategy's full fill history on every call
+    (app/routers/pairs.py's Pair Overview/Analytics, polled every 5s).
+    starting_cash=0.0 is the right default for that caller: a strategy-
+    scoped view has no meaningful "starting cash" of its own, only the
+    positions it accumulated.
+
     The fix is incremental, not a shortcut around correctness: the walk
     state (_WalkState -- cash/qty/avg_px/realized_by_symbol, bounded by
     DISTINCT symbols ever traded, never by order count) is cached and
     resumed across calls, keyed by (user_id, mode, sub_account_id,
-    only_primary). A repeat call only fetches orders with id > the last
+    only_primary, strategy_key). A repeat call only fetches orders with id > the last
     one already folded into the cached state -- a cheap, indexed query --
     and feeds ONLY those through _apply_fill, the exact same per-fill
     step _walk_fills itself uses (see that function's own docstring on
@@ -380,7 +389,7 @@ def get_cached_account_snapshot(
     if sub_account_id is not None and only_primary:
         raise ValueError("sub_account_id and only_primary are mutually exclusive")
 
-    key = (user_id, mode, sub_account_id, only_primary)
+    key = (user_id, mode, sub_account_id, only_primary, strategy_key)
     with _account_cache_lock:
         state = _account_cache.get(key)
 
@@ -389,6 +398,8 @@ def get_cached_account_snapshot(
             base_query = base_query.filter(Order.sub_account_id == sub_account_id)
         elif only_primary:
             base_query = base_query.filter(Order.sub_account_id.is_(None))
+        if strategy_key is not None:
+            base_query = base_query.filter(Order.strategy_key == strategy_key)
 
         if state is not None and state.last_order_id:
             # Guard against a stale cache outliving the very order history
