@@ -461,8 +461,8 @@ class AngelOneAdapter:
         if failed_at is not None and time.monotonic() - failed_at < _FAILED_RESOLUTION_TTL_SECONDS:
             raise AngelOneError(
                 f"could not resolve {symbol!r} to a standard NSE equity instrument "
-                f"(failed {time.monotonic() - failed_at:.0f}s ago -- not retrying yet, "
-                f"see _FAILED_RESOLUTION_TTL_SECONDS)"
+                f"(Angel One's symbol lookup failed {time.monotonic() - failed_at:.0f}s ago; "
+                f"will retry automatically after {_FAILED_RESOLUTION_TTL_SECONDS:.0f}s)"
             )
 
         try:

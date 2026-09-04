@@ -62,6 +62,15 @@ function fmtOhlc(v) {
 // of gapping, duplicating, or misaligning with it.
 function useCandleAggregator(symbol, candleSeconds, mode) {
   const [loading, setLoading] = React.useState(true);
+  // Real bug found live, 2026-09-05: a failed history fetch (confirmed
+  // against a real Angel One outage -- their own searchScrip returning
+  // no matches for legitimate NSE symbols) fell back to an "honestly
+  // empty chart" with NO indication of WHY, indistinguishable from a
+  // symbol that genuinely has no history yet. Both are real, honest
+  // states, but they're not the SAME state, and only one of them is
+  // "nothing is wrong, there's just no data" -- this surfaces the real
+  // error message instead of silently discarding it.
+  const [error, setError] = React.useState(null);
   // The current (or, briefly after a seed with nothing forming yet, the
   // last finalized) candle's own real OHLC -- surfaced for the toolbar's
   // legend badges, NOT re-derived or guessed separately; same object
@@ -124,6 +133,7 @@ function useCandleAggregator(symbol, candleSeconds, mode) {
     currentRef.current = null;
     bucketStartRef.current = 0;
     setLoading(true);
+    setError(null);
 
     const intervalKey = secondsToKey(candleSeconds, mode);
     const fetchHistory = mode === "live" ? api.live.history : api.market.history;
@@ -162,10 +172,17 @@ function useCandleAggregator(symbol, candleSeconds, mode) {
         }
         applyToChart();
       })
-      .catch(() => {
+      .catch((err) => {
+        if (cancelled) return;
         // Seed failed -- fall back to an honestly empty chart (refs are
         // already reset above) rather than leaving the PREVIOUS symbol's/
         // interval's stale bars on screen once the loading skeleton lifts.
+        // But "empty because the fetch genuinely failed" (a broker outage,
+        // a network error) is a DIFFERENT real state from "empty because
+        // there's honestly no history yet" -- collapsing them into the
+        // same silent blank chart is what made a real Angel One outage
+        // look, from the user's side, like the chart was just broken.
+        setError(err && err.message ? err.message : "Could not load chart data.");
         applyToChart();
       })
       .finally(() => { if (!cancelled) setLoading(false); });
@@ -174,7 +191,7 @@ function useCandleAggregator(symbol, candleSeconds, mode) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, candleSeconds, mode]);
 
-  return { onTick, seedChart, loading, latestCandle };
+  return { onTick, seedChart, loading, error, latestCandle };
 }
 
 // The first consumer of the generic Modal primitive -- was its own bespoke
@@ -245,7 +262,7 @@ export function CandleChart({ symbol, price, height = "440px", stale = false, on
   // change: every value here renders the SAME real OHLC series this
   // component already aggregates, just with a different visual encoding.
   const [chartType, setChartType] = React.useState("candle_solid");
-  const { onTick, seedChart, loading, latestCandle } = useCandleAggregator(symbol, candleSeconds, mode);
+  const { onTick, seedChart, loading, error, latestCandle } = useCandleAggregator(symbol, candleSeconds, mode);
 
   React.useEffect(() => {
     const chart = init(containerId, {
@@ -441,6 +458,19 @@ export function CandleChart({ symbol, price, height = "440px", stale = false, on
         ${loading && html`
           <${SkeletonBlock} height=${isFullscreen ? "calc(100vh - 40px)" : height}
                              style=${{ position: "absolute", inset: 0 }} />
+        `}
+        ${!loading && error && html`
+          <div class="candle-chart-error"
+               style=${{
+                 position: "absolute", inset: 0, display: "flex", flexDirection: "column",
+                 alignItems: "center", justifyContent: "center", gap: "8px",
+                 background: "rgba(10, 14, 22, 0.85)", textAlign: "center", padding: "0 24px",
+               }}>
+            <span style=${{ fontSize: "20px" }}>⚠</span>
+            <span class="text-secondary" style=${{ fontSize: "13px", maxWidth: "360px" }}>
+              Couldn't load chart data${mode === "live" ? " from the live feed" : ""}: ${error}
+            </span>
+          </div>
         `}
       </div>
       ${pickerOpen && html`<${IndicatorPicker} active=${active} onToggle=${toggleIndicator} onClose=${() => setPickerOpen(false)} />`}
