@@ -39,7 +39,17 @@ function KellySizer({ risk, onRiskChange }) {
   const toast = useToast();
 
   React.useEffect(() => {
-    api.dashboard.stats().then(setDashStats).catch((e) => setFetchError(e.message || "Could not load trade history"));
+    // "paper" explicitly, not omitted -- api.dashboard.stats() started
+    // requiring a real mode argument once GET /dashboard/stats became
+    // mode-aware (2026-09-04, see Dashboard.js's own fix), and this call
+    // site was missed: real bug found live via a Playwright walkthrough
+    // (a genuine 422 on every load of this page, silently swallowed into
+    // the same "could not load" state a real network failure produces).
+    // "paper" is correct here regardless -- Kelly sizing reads THIS
+    // account's real paper trade history specifically (see this
+    // function's own docstring), the same scope GET /optimizer's own
+    // backend router already hardcodes internally.
+    api.dashboard.stats("paper").then(setDashStats).catch((e) => setFetchError(e.message || "Could not load trade history"));
     api.account().then((a) => setAccountValue(a.total_value)).catch((e) => setFetchError(e.message || "Could not load account value"));
   }, []);
   React.useEffect(() => subscribeMarket(REFERENCE_SYMBOL, (tick) => setPrice(tick.price)), []);
