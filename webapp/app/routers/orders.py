@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.accounting import STARTING_VIRTUAL_CASH_DEFAULT, compute_account
+from app.accounting import STARTING_VIRTUAL_CASH_DEFAULT, get_cached_account_snapshot
 from app.auth import get_current_user
 from app.brackets import cancel_brackets_closed_elsewhere
 from app.broker.adapter_cache import IncompleteBrokerCredentialError, NoBrokerCredentialError, get_adapter_for_user
@@ -180,11 +180,13 @@ def submit_order(
     # not an estimate.
     if body.side == "buy":
         starting_cash = STARTING_VIRTUAL_CASH_DEFAULT if mode_enum == Mode.virtual else None
-        existing_orders = db.query(Order).filter(
-            Order.user_id == user.id, Order.mode == mode_enum, Order.sub_account_id.is_(None),
-        ).all()
-        snapshot = compute_account(
-            existing_orders, registry.current_prices(), only_primary=True,
+        # get_cached_account_snapshot, not a fresh full-history fetch+walk
+        # -- this check runs on EVERY buy submission, in both paper and
+        # virtual mode, so it paid the same 107K-order re-walk cost GET
+        # /account did (see that function's own docstring), just on the
+        # order-entry hot path instead of a background poll.
+        snapshot = get_cached_account_snapshot(
+            db, user.id, mode_enum, registry.current_prices(), only_primary=True,
             **({"starting_cash": starting_cash} if starting_cash is not None else {}),
         )
         est_px = body.px if body.order_type in ("limit", "stop_limit") else market.current_price

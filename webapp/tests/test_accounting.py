@@ -1,9 +1,23 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
-from app.accounting import compute_account, compute_equity_curve, compute_realized_pnl_curve, compute_realizations
+from app.accounting import (
+    STARTING_PAPER_CASH_DEFAULT,
+    STARTING_VIRTUAL_CASH_DEFAULT,
+    _account_cache,
+    compute_account,
+    compute_equity_curve,
+    compute_realized_pnl_curve,
+    compute_realizations,
+    get_cached_account_snapshot,
+)
+from app.db import Base
 from app.models.trading import Mode, Order, OrderStatus, OrderType, Side
+from app.models.user import User
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -315,3 +329,193 @@ def test_compute_realizations_matches_compute_accounts_total(monkeypatch):
     acc = compute_account(orders, current_prices={"RELIANCE": 3000.0, "TCS": 3900.0}, starting_cash=1_000_000.0)
     events = compute_realizations(orders, starting_cash=1_000_000.0)
     assert sum(e.amount for e in events) == pytest.approx(acc.total_realized_pnl)
+
+
+# ---------------------------------------------------------------------------
+# get_cached_account_snapshot: the incremental cache added 2026-09-04 to fix
+# a real, confirmed-live latency problem (GET /account re-walking a 107,651-
+# order paper account from scratch on every poll). Unlike every test above,
+# this one needs a real DB session -- get_cached_account_snapshot queries
+# Order.id directly (the incremental watermark), which only exists once a
+# row has actually been inserted.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def db():
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    yield session
+    session.close()
+
+
+@pytest.fixture
+def user(db):
+    u = User(google_sub="s", email="e@x.com", display_name="T")
+    db.add(u)
+    db.commit()
+    db.refresh(u)
+    return u
+
+
+@pytest.fixture(autouse=True)
+def _clear_account_cache():
+    """_account_cache is process-global by design (get_cached_account_
+    snapshot's own docstring explains why -- a small, single-process dev
+    deployment, same scope as app/broker/adapter_cache.py's own cache).
+    Each test below gets a FRESH in-memory DB whose first user is very
+    likely to reuse id=1 -- without clearing this between tests, a later
+    test could read an earlier test's cached state for the same
+    (user_id, mode, sub_account_id, only_primary) key and silently pass
+    for the wrong reason."""
+    _account_cache.clear()
+    yield
+    _account_cache.clear()
+
+
+def _db_order(user_id, symbol, side, filled_qty, avg_fill_px, minutes_after_t0=0, mode=Mode.paper, sub_account_id=None):
+    return Order(
+        user_id=user_id, mode=mode, symbol=symbol, side=side, order_type=OrderType.market,
+        qty=filled_qty, px=None, status=OrderStatus.filled, filled_qty=filled_qty, avg_fill_px=avg_fill_px,
+        created_at=T0 + timedelta(minutes=minutes_after_t0), sub_account_id=sub_account_id,
+    )
+
+
+def test_cached_snapshot_matches_a_full_walk_across_incremental_batches(db, user):
+    """The single most important test for this cache: simulate real usage
+    (new fills arriving between polls, e.g. AccountPanel.js hitting GET
+    /account every few seconds) by inserting orders in three separate
+    batches and calling get_cached_account_snapshot after each one --
+    then confirm the FINAL cached snapshot is identical to calling
+    compute_account once on the full order history fetched fresh. Covers
+    opens, adds, partial closes, and flips-through-flat in BOTH directions
+    across two symbols, since a bug in the incremental path could easily
+    hide behind a scenario that never actually flips or partially closes
+    anything."""
+    prices = {"RELIANCE": 3180.0, "TCS": 4050.0}
+
+    batch1 = [
+        _db_order(user.id, "RELIANCE", Side.buy, 10, 2900.0, minutes_after_t0=0),   # open long 10
+        _db_order(user.id, "RELIANCE", Side.buy, 5, 3000.0, minutes_after_t0=1),    # add -> long 15
+        _db_order(user.id, "TCS", Side.sell, 8, 4000.0, minutes_after_t0=2),        # open short 8
+    ]
+    db.add_all(batch1)
+    db.commit()
+    snap1 = get_cached_account_snapshot(db, user.id, Mode.paper, prices)
+    assert snap1.positions["RELIANCE"].qty == 15
+    assert snap1.positions["TCS"].qty == -8
+
+    batch2 = [
+        _db_order(user.id, "RELIANCE", Side.sell, 6, 3100.0, minutes_after_t0=3),   # partial close -> long 9
+        _db_order(user.id, "TCS", Side.buy, 12, 3900.0, minutes_after_t0=4),        # flip short 8 -> long 4
+        _db_order(user.id, "RELIANCE", Side.sell, 20, 3200.0, minutes_after_t0=5),  # flip long 9 -> short 11
+    ]
+    db.add_all(batch2)
+    db.commit()
+    snap2 = get_cached_account_snapshot(db, user.id, Mode.paper, prices)
+    assert snap2.positions["RELIANCE"].qty == -11
+    assert snap2.positions["TCS"].qty == 4
+
+    batch3 = [
+        _db_order(user.id, "TCS", Side.sell, 4, 4100.0, minutes_after_t0=6),        # fully closes TCS
+        _db_order(user.id, "RELIANCE", Side.buy, 3, 3150.0, minutes_after_t0=7),    # partial close -> short 8
+    ]
+    db.add_all(batch3)
+    db.commit()
+    snap3 = get_cached_account_snapshot(db, user.id, Mode.paper, prices)
+
+    # A repeat call with no new orders in between must be idempotent --
+    # no double-counting a fill that was already folded into the cache.
+    snap3_again = get_cached_account_snapshot(db, user.id, Mode.paper, prices)
+    assert snap3_again == snap3
+
+    all_orders = db.query(Order).filter(Order.user_id == user.id, Order.mode == Mode.paper).all()
+    expected = compute_account(all_orders, current_prices=prices, starting_cash=STARTING_PAPER_CASH_DEFAULT)
+
+    assert snap3.cash == pytest.approx(expected.cash)
+    assert snap3.total_realized_pnl == pytest.approx(expected.total_realized_pnl)
+    assert snap3.total_unrealized_pnl == pytest.approx(expected.total_unrealized_pnl)
+    assert set(snap3.positions.keys()) == set(expected.positions.keys())
+    for sym, pos in expected.positions.items():
+        got = snap3.positions[sym]
+        assert got.qty == pos.qty
+        assert got.avg_entry_px == pytest.approx(pos.avg_entry_px)
+        assert got.realized_pnl == pytest.approx(pos.realized_pnl)
+        assert got.unrealized_pnl == pytest.approx(pos.unrealized_pnl)
+    assert "TCS" not in snap3.positions, "TCS was fully closed in batch 3 and must not linger in the snapshot"
+
+
+def test_cache_key_isolates_by_user_mode_and_sub_account(db, user):
+    """The cache key is (user_id, mode, sub_account_id, only_primary) --
+    confirm none of those axes leak into another: a caching bug here
+    would silently show one user's or one mode's positions under
+    another's, which is a much worse failure than the latency this cache
+    exists to fix."""
+    other_user = User(google_sub="s2", email="e2@x.com", display_name="T2")
+    db.add(other_user)
+    db.commit()
+    db.refresh(other_user)
+
+    orders = [
+        _db_order(user.id, "RELIANCE", Side.buy, 10, 2900.0, mode=Mode.paper, minutes_after_t0=0),
+        _db_order(user.id, "RELIANCE", Side.buy, 4, 2900.0, mode=Mode.virtual, minutes_after_t0=1),
+        _db_order(other_user.id, "RELIANCE", Side.buy, 7, 2900.0, mode=Mode.paper, minutes_after_t0=2),
+        _db_order(user.id, "TCS", Side.buy, 2, 4000.0, mode=Mode.paper, minutes_after_t0=3, sub_account_id=5),
+    ]
+    db.add_all(orders)
+    db.commit()
+
+    prices = {"RELIANCE": 2900.0, "TCS": 4000.0}
+    user_paper = get_cached_account_snapshot(db, user.id, Mode.paper, prices)
+    user_virtual = get_cached_account_snapshot(db, user.id, Mode.virtual, prices, starting_cash=STARTING_VIRTUAL_CASH_DEFAULT)
+    other_paper = get_cached_account_snapshot(db, other_user.id, Mode.paper, prices)
+    user_paper_only_primary = get_cached_account_snapshot(db, user.id, Mode.paper, prices, only_primary=True)
+    user_paper_sub5 = get_cached_account_snapshot(db, user.id, Mode.paper, prices, sub_account_id=5)
+
+    assert user_paper.positions["RELIANCE"].qty == 10
+    assert "TCS" in user_paper.positions, "unfiltered view (neither sub_account_id nor only_primary) includes the sub-account order too"
+    assert user_virtual.positions["RELIANCE"].qty == 4
+    assert other_paper.positions["RELIANCE"].qty == 7
+    assert "TCS" not in user_paper_only_primary.positions
+    assert user_paper_sub5.positions["TCS"].qty == 2
+    assert "RELIANCE" not in user_paper_sub5.positions
+
+
+def test_get_cached_account_snapshot_rejects_conflicting_filters(db, user):
+    with pytest.raises(ValueError):
+        get_cached_account_snapshot(db, user.id, Mode.paper, {}, sub_account_id=1, only_primary=True)
+
+
+def test_cached_snapshot_rebuilds_when_its_watermark_order_no_longer_exists(db, user):
+    """Regression test for a real bug this cache's own test suite hit
+    immediately: _account_cache is process-global (by design -- see its
+    own docstring), but tests/conftest.py hands every test a brand new,
+    empty in-memory SQLite DB. A first test populates the cache for
+    (user_id=1, Mode.paper, ...); a second test's fresh DB reuses that
+    same user_id=1 with its OWN unrelated orders starting again from
+    Order.id=1 -- without a staleness check, the cache would keep
+    serving the first test's stale positions (or worse, silently drop
+    every 'new' order because their ids sit below the stale watermark).
+    This constructs that exact scenario directly: prime the cache against
+    one real order, then simulate the underlying DB having moved out from
+    under it by forging a state whose last_order_id no longer exists."""
+    order = _db_order(user.id, "RELIANCE", Side.buy, 10, 2900.0)
+    db.add(order)
+    db.commit()
+    snap = get_cached_account_snapshot(db, user.id, Mode.paper, {"RELIANCE": 2900.0})
+    assert snap.positions["RELIANCE"].qty == 10
+
+    # Forge exactly what a stale cache from a DIFFERENT, now-gone database
+    # looks like: a watermark pointing at an order id this DB has never
+    # had.
+    key = (user.id, Mode.paper, None, False)
+    _account_cache[key].last_order_id = 999_999
+
+    fresh_order = _db_order(user.id, "TCS", Side.sell, 3, 4000.0, minutes_after_t0=1)
+    db.add(fresh_order)
+    db.commit()
+
+    rebuilt = get_cached_account_snapshot(db, user.id, Mode.paper, {"RELIANCE": 2900.0, "TCS": 4000.0})
+    assert rebuilt.positions["RELIANCE"].qty == 10, "a stale watermark must trigger a full rebuild, not silently drop the real RELIANCE position"
+    assert rebuilt.positions["TCS"].qty == -3, "and must still pick up the order that arrived after the stale watermark was forged"
