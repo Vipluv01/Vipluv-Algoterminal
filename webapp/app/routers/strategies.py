@@ -15,7 +15,7 @@ from app.db import get_db
 from app.markets import NAMED_INSTRUMENTS
 from app.models.trading import Mode, StrategyAllocation
 from app.models.user import User
-from app.pairs_service import PAIRS_STRATEGY_KEY
+from app.pairs_service import PAIRS_STRATEGY_KEY, PAIRS_SYMBOL_A, PAIRS_SYMBOL_B
 from app.strategy_runner import OPTIONS_STRATEGIES, SINGLE_INSTRUMENT_STRATEGIES
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
@@ -25,6 +25,17 @@ class StrategyInfo(BaseModel):
     key: str
     name: str
     kind: Literal["single_instrument", "pairs", "options"]
+    # The fixed instrument a pairs/options strategy trades -- never user-
+    # configurable (see set_allocation's own comment on why), but real,
+    # not omitted: each options strategy has its OWN underlying (iron_
+    # condor/calendar_spread on NIFTY50, short_strangle on BANKNIFTY,
+    # delta_neutral on ICICIBANK -- confirmed from each strategy class's
+    # own .underlying default, not guessed), and the frontend's own
+    # symbol picker used to render as if it were editable for these too,
+    # silently ignored server-side either way. None for single_instrument
+    # strategies, which use the real, user-editable `symbol` field
+    # instead.
+    fixed_underlying: str | None = None
 
 
 @router.get("", response_model=list[StrategyInfo])
@@ -35,8 +46,12 @@ def list_strategies():
     ]
     infos.append(StrategyInfo(
         key=PAIRS_STRATEGY_KEY, name="Pairs Trading (cointegration + Kalman hedge ratio)", kind="pairs",
+        fixed_underlying=f"{PAIRS_SYMBOL_A} / {PAIRS_SYMBOL_B}",
     ))
-    infos.extend(StrategyInfo(key=s.key, name=s.name, kind="options") for s in OPTIONS_STRATEGIES.values())
+    infos.extend(
+        StrategyInfo(key=s.key, name=s.name, kind="options", fixed_underlying=s.underlying)
+        for s in OPTIONS_STRATEGIES.values()
+    )
     return infos
 
 
