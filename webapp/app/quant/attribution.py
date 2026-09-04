@@ -12,12 +12,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.markets import NAMED_INSTRUMENTS
+
 # The standard benchmark for this app: an equal-weight buy-and-hold basket
-# of the 7 NSE instruments app/markets.py trades (see NAMED_INSTRUMENTS
-# there). Attribution is meaningless without naming what it's measured
-# against -- this constant IS that name, and every attribution result
-# computed with it should be presented alongside this fact, not silently.
-BENCHMARK_SYMBOLS = ("ICICIBANK", "HDFCBANK", "RELIANCE", "TCS", "INFY", "SBIN", "TATAMOTORS")
+# of every NSE instrument app/markets.py trades (NAMED_INSTRUMENTS there).
+# Attribution is meaningless without naming what it's measured against --
+# this constant IS that name, and every attribution result computed with
+# it should be presented alongside this fact, not silently. Derived from
+# NAMED_INSTRUMENTS directly (not an independently-maintained copy) since
+# this was always meant to track "every instrument paper/virtual mode
+# trades" -- a hand-duplicated literal here already went stale once (still
+# read "the 7" after the 2026-09-04 expansion to 22) before being fixed
+# into an import.
+BENCHMARK_SYMBOLS = tuple(NAMED_INSTRUMENTS)
 BENCHMARK_WEIGHT = 1.0 / len(BENCHMARK_SYMBOLS)
 
 

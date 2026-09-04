@@ -3,6 +3,8 @@ NAMED benchmark, the realized P&L walk, and the sub-account breakdown."""
 
 import pytest
 
+from app.markets import NAMED_INSTRUMENTS
+
 
 def test_attribution_names_its_benchmark(client):
     resp = client.get("/portfolio/attribution")
@@ -10,7 +12,11 @@ def test_attribution_names_its_benchmark(client):
     body = resp.json()
     assert body["benchmark_name"]
     assert "ICICIBANK" in body["benchmark_symbols"]
-    assert len(body["benchmark_symbols"]) == 7
+    # Tracks NAMED_INSTRUMENTS' own count, not a hardcoded number -- a
+    # literal "== 7" here already went stale once (the 2026-09-04
+    # expansion to 22) before being fixed to derive from the same source
+    # BENCHMARK_SYMBOLS itself now does (app/quant/attribution.py).
+    assert len(body["benchmark_symbols"]) == len(NAMED_INSTRUMENTS)
     assert body["methodology_note"]
 
 

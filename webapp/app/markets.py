@@ -54,6 +54,37 @@ NAMED_INSTRUMENTS: dict[str, float] = {
     "INFY": 1850.0,
     "SBIN": 810.0,
     "TATAMOTORS": 980.0,
+    # Expanded 2026-09-04 (the original 7's paper/virtual-only limitation
+    # was raised directly -- live mode already generalized to every real
+    # NSE stock, since that's just a data-fetch against Angel One's own
+    # universe; paper/virtual can't do the same because each entry here is
+    # its OWN continuously-running matching-engine subprocess + trading
+    # agents, a real ongoing compute cost, not a UI change. Confirmed live
+    # this scales fine: steady-state CPU with the original 7 measured
+    # ~22% of one core with no test traffic; each SymbolMarket's own
+    # simserver subprocess sits at ~0% CPU when idle, since it's event-
+    # driven, not polling). These 15 more real, liquid NSE large-caps were
+    # picked to broaden the universe meaningfully without an unbounded
+    # subprocess count -- reference prices are REAL LTPs fetched from this
+    # app's own live Angel One connection at the moment this was written
+    # (GET /live/market/quotes), not guessed, for the same reason the
+    # original 7's own prices above were sourced as real levels rather
+    # than invented.
+    "KOTAKBANK": 424.65,
+    "AXISBANK": 1275.40,
+    "BAJFINANCE": 1059.10,
+    "BHARTIARTL": 1852.90,
+    "ITC": 264.65,
+    "HINDUNILVR": 1975.00,
+    "LT": 3980.90,
+    "MARUTI": 12684.00,
+    "ASIANPAINT": 2527.20,
+    "TITAN": 4990.00,
+    "SUNPHARMA": 1902.00,
+    "WIPRO": 177.52,
+    "HCLTECH": 1300.60,
+    "TATASTEEL": 184.42,
+    "ADANIPORTS": 1707.60,
 }
 
 # NIFTY50 and BANKNIFTY as DERIVED weighted baskets of the constituents
@@ -62,16 +93,19 @@ NAMED_INSTRUMENTS: dict[str, float] = {
 # index PROXY rather than a separately-matched instrument). Real NSE index
 # weights are free-float-market-cap-weighted with a divisor normalizing the
 # level to a base value (~1000 at launch); this project has no market-cap
-# data for its 7 constituents to weight by, so these are EQUAL-weighted
+# data for its constituents to weight by, so these are EQUAL-weighted
 # (weights sum to 1, I_t = sum(w_i * S_i(t))) -- an honestly-simplified
 # proxy, not an attempt at a real index level. BANKNIFTY's constituents are
-# the 3 bank names already in NAMED_INSTRUMENTS (the same pair
-# pairs_cointegration.py trades, plus SBIN); NIFTY50 uses all 7 as a
+# the 5 bank names in NAMED_INSTRUMENTS (ICICIBANK/HDFCBANK/SBIN, the
+# original 3 -- plus KOTAKBANK/AXISBANK, added in the 2026-09-04
+# expansion, both genuinely major real NSE private banks, so BANKNIFTY
+# stayed an honest bank-sector proxy rather than freezing at its original,
+# now-incomplete set); NIFTY50 uses every named instrument (now 22) as a
 # broad-market proxy, despite the real index having 50 names -- there are
-# only 7 simulated instruments to draw from at all.
+# only as many simulated instruments to draw from as NAMED_INSTRUMENTS has.
 DERIVED_INDICES: dict[str, dict[str, float]] = {
     "NIFTY50": {sym: 1.0 / len(NAMED_INSTRUMENTS) for sym in NAMED_INSTRUMENTS},
-    "BANKNIFTY": {sym: 1.0 / 3 for sym in ("ICICIBANK", "HDFCBANK", "SBIN")},
+    "BANKNIFTY": {sym: 1.0 / 5 for sym in ("ICICIBANK", "HDFCBANK", "SBIN", "KOTAKBANK", "AXISBANK")},
 }
 
 # The engine `owner` id the human paper-trading user's own orders submit
