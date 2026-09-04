@@ -227,3 +227,101 @@ def test_telemetry_cache_does_not_leak_across_app_lifespans():
         # A fresh lifespan started -- the previous one's cached telemetry
         # must NOT still be visible.
         assert c2.get("/pairs/overview").json()["telemetry"] is None
+
+
+# ---------------------------------------------------------------------------
+# GET /pairs/test -- real cointegration stats for ANY two symbols, added
+# 2026-09-04 so a user can try their own custom pair rather than only ever
+# seeing PAIRS_SYMBOL_A/B's fixed ICICIBANK/HDFCBANK. compute_pair_stats
+# itself is unchanged and already covered above via /overview and
+# /analytics; these tests are about the NEW endpoint's own wiring --
+# arbitrary symbols, validation, and the suggested-trade sizing.
+# ---------------------------------------------------------------------------
+
+def _seed(symbol_a, symbol_b, cointegrated=True, n=300, seed=0):
+    if cointegrated:
+        a, b = _cointegrated_pair(n=n, seed=seed)
+    else:
+        # Two unrelated random walks -- NOT cointegrated by construction,
+        # same construction as _seed_independent_price_history above,
+        # just parametrized to an arbitrary symbol pair rather than
+        # hardcoded to ICICIBANK/HDFCBANK.
+        rng = np.random.default_rng(seed)
+        a = 100 + np.cumsum(rng.normal(0, 1.0, n))
+        b = 50 + np.cumsum(rng.normal(0, 1.0, n))
+    app.state.registry.markets[symbol_a].price_history = list(a)
+    app.state.registry.markets[symbol_b].price_history = list(b)
+
+
+def test_pairs_test_reports_warming_up_with_default_fresh_registry(client):
+    resp = client.get("/pairs/test", params={"symbol_a": "RELIANCE", "symbol_b": "TCS"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["warming_up"] is True
+    assert body["zscore"] is None
+    assert body["suggested_direction"] == "none"
+
+
+def test_pairs_test_works_on_a_pair_other_than_the_validated_one(client):
+    """The whole point: RELIANCE/TCS has never been validated the way
+    ICICIBANK/HDFCBANK was, but this endpoint must still compute REAL
+    stats for it, not silently fall back to the validated pair."""
+    _seed("RELIANCE", "TCS")
+    resp = client.get("/pairs/test", params={"symbol_a": "RELIANCE", "symbol_b": "TCS"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["warming_up"] is False
+    assert body["symbol_a"] == "RELIANCE"
+    assert body["symbol_b"] == "TCS"
+    assert body["is_cointegrated"] is True
+    assert body["cointegration_pvalue"] < 0.05
+
+
+def test_pairs_test_honestly_reports_a_non_cointegrated_pair_with_no_suggestion(client):
+    """Most random pairs a user tries will NOT be cointegrated -- this
+    must be reported honestly (is_cointegrated=False), and no trade
+    direction suggested for a pair with no real statistical basis to
+    trade, never a fabricated 'do it anyway' signal."""
+    _seed("RELIANCE", "TCS", cointegrated=False)
+    resp = client.get("/pairs/test", params={"symbol_a": "RELIANCE", "symbol_b": "TCS"})
+    body = resp.json()
+    assert body["is_cointegrated"] is False
+    assert body["suggested_direction"] == "none"
+
+
+def test_pairs_test_suggested_qty_b_is_beta_scaled_not_equal_to_qty_a(client):
+    """Same sizing discipline as the validated strategy's own
+    _leg_b_qty: a hedge-neutral pair position needs qty_b proportional to
+    the hedge ratio, not equal to qty_a."""
+    _seed("RELIANCE", "TCS")
+    resp = client.get("/pairs/test", params={"symbol_a": "RELIANCE", "symbol_b": "TCS", "qty_a": 20})
+    body = resp.json()
+    assert body["suggested_qty_a"] == 20
+    beta = body["hedge_ratio"]
+    assert body["suggested_qty_b"] == max(1, round(20 * beta))
+
+
+def test_pairs_test_rejects_identical_symbols(client):
+    resp = client.get("/pairs/test", params={"symbol_a": "RELIANCE", "symbol_b": "RELIANCE"})
+    assert resp.status_code == 400
+
+
+def test_pairs_test_rejects_an_unknown_symbol_in_paper_mode(client):
+    resp = client.get("/pairs/test", params={"symbol_a": "RELIANCE", "symbol_b": "NOT_A_REAL_SYMBOL"})
+    assert resp.status_code == 404
+
+
+def test_pairs_test_rejects_a_non_positive_qty_a(client):
+    resp = client.get("/pairs/test", params={"symbol_a": "RELIANCE", "symbol_b": "TCS", "qty_a": 0})
+    assert resp.status_code == 400
+
+
+def test_pairs_test_works_in_virtual_mode_too(client):
+    """mode is accepted and threaded through -- paper and virtual share
+    the SAME underlying registry/price history (Mode.virtual's own
+    docstring), so this is really confirming the mode param doesn't 404
+    or silently ignore virtual, not a claim virtual has separate prices."""
+    _seed("RELIANCE", "TCS")
+    resp = client.get("/pairs/test", params={"symbol_a": "RELIANCE", "symbol_b": "TCS", "mode": "virtual"})
+    assert resp.status_code == 200
+    assert resp.json()["warming_up"] is False

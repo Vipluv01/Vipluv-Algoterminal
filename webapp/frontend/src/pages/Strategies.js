@@ -3,8 +3,6 @@ import { html } from "../html.js";
 import { api } from "../api.js";
 import { useToast } from "../toast.js";
 
-const SYMBOL_OPTIONS = ["ICICIBANK", "HDFCBANK", "RELIANCE", "TCS", "INFY", "SBIN", "TATAMOTORS"];
-
 const STRATEGY_BLURBS = {
   alpha_rsi_ema: "Trades EMA(9)/EMA(21) crossovers, confirmed by RSI recovering from oversold or pulling back from overbought.",
   momentum_macd: "Follows a sustained trend: enters on a MACD histogram flip in the direction price is already moving relative to its EMA(50).",
@@ -12,10 +10,10 @@ const STRATEGY_BLURBS = {
   pairs_cointegration: "Trades the ICICIBANK/HDFCBANK spread back to equilibrium via Engle-Granger cointegration and a Kalman-filtered hedge ratio — validated methodology from icici_mean_reversion (Sharpe 1.74 backtested).",
 };
 
-function StrategyCard({ strategy, allocation, onSave }) {
+function StrategyCard({ strategy, allocation, symbolOptions, onSave }) {
   const isPairs = strategy.kind === "pairs";
   const [enabled, setEnabled] = React.useState(allocation?.enabled ?? false);
-  const [symbol, setSymbol] = React.useState(allocation?.symbol ?? SYMBOL_OPTIONS[0]);
+  const [symbol, setSymbol] = React.useState(allocation?.symbol ?? symbolOptions[0]);
   const [weight, setWeight] = React.useState(allocation?.weight ?? 0.5);
   const [saving, setSaving] = React.useState(false);
   const toast = useToast();
@@ -47,7 +45,7 @@ function StrategyCard({ strategy, allocation, onSave }) {
         <div class="field">
           <label>Symbol</label>
           <select class="input" value=${symbol} onChange=${(e) => setSymbol(e.target.value)} disabled=${enabled}>
-            ${SYMBOL_OPTIONS.map((s) => html`<option key=${s} value=${s}>${s}</option>`)}
+            ${symbolOptions.map((s) => html`<option key=${s} value=${s}>${s}</option>`)}
           </select>
         </div>
       `}
@@ -73,13 +71,24 @@ function StrategyCard({ strategy, allocation, onSave }) {
 export function Strategies() {
   const [strategies, setStrategies] = React.useState([]);
   const [allocations, setAllocations] = React.useState([]);
+  // Real bug fixed 2026-09-04: the symbol picker was a hardcoded 7-name
+  // literal, already stale against app/routers/strategies.py's own
+  // server-side validation (body.symbol not in NAMED_INSTRUMENTS), which
+  // has generalized to every paper/virtual symbol since app/markets.py's
+  // own 2026-09-04 expansion to 22. Fetched here (not hardcoded again)
+  // so this picker can never silently fall behind that list a second
+  // time -- filtered to real instruments only (!is_derived): a
+  // single-instrument strategy can't meaningfully trade a synthetic
+  // index the same way a real symbol's own order book can be traded.
+  const [symbolOptions, setSymbolOptions] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
   const toast = useToast();
 
   const load = React.useCallback(async () => {
-    const [s, a] = await Promise.all([api.strategies.list(), api.strategies.allocations()]);
+    const [s, a, syms] = await Promise.all([api.strategies.list(), api.strategies.allocations(), api.symbols()]);
     setStrategies(s);
     setAllocations(a);
+    setSymbolOptions(syms.filter((sym) => !sym.is_derived).map((sym) => sym.symbol));
     setLoading(false);
   }, []);
   React.useEffect(() => { load(); }, [load]);
@@ -106,7 +115,7 @@ export function Strategies() {
         : html`
           <div class="strategies-grid">
             ${strategies.map((s) => html`
-              <${StrategyCard} key=${s.key} strategy=${s} allocation=${allocByKey[s.key]} onSave=${saveAllocation} />
+              <${StrategyCard} key=${s.key} strategy=${s} allocation=${allocByKey[s.key]} symbolOptions=${symbolOptions} onSave=${saveAllocation} />
             `)}
           </div>
         `}

@@ -261,6 +261,11 @@ export const api = {
     overview: () => request("GET", "/pairs/overview"),
     analytics: () => request("GET", "/pairs/analytics"),
     close: () => request("POST", "/pairs/close"),
+    // Real cointegration/hedge-ratio stats for ANY two symbols, not just
+    // the one validated ICICIBANK/HDFCBANK pair -- see
+    // app/routers/pairs.py's test_custom_pair docstring.
+    test: (symbolA, symbolB, mode, qtyA) =>
+      request("GET", `/pairs/test?symbol_a=${symbolA}&symbol_b=${symbolB}&mode=${mode}&qty_a=${qtyA}`),
   },
 
   optimizer: () => request("GET", "/optimizer"),
