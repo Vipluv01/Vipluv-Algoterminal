@@ -260,8 +260,40 @@ export function CandleChart({ symbol, price, height = "440px", stale = false, on
           // ticker's pos/neg text) back to the old green/red pair.
           bar: { upColor: "#00e676", downColor: "#ff1744", upBorderColor: "#00e676", downBorderColor: "#ff1744", upWickColor: "#00e676", downWickColor: "#ff1744" },
           priceMark: { last: { upColor: "#00e676", downColor: "#ff1744" } },
-          tooltip: { textColor: "#8892a6" },
+          // Real bug fixed 2026-09-04, found via a live screenshot: this
+          // used to be `tooltip: { textColor: "#8892a6" }` -- confirmed
+          // directly against the actual shipped klinecharts@9.8.9 bundle
+          // (fetched and grepped, not guessed) that `textColor` isn't a
+          // recognized style key anywhere in it, so that line was a
+          // silent no-op the whole time, AND klinecharts' own default
+          // tooltip config is showRule: "always" (permanently visible,
+          // not just on hover) with showType: "standard" (no background
+          // rect) -- together that's exactly the "OHLC/MA text
+          // permanently overlapping the candles and volume bars" clutter
+          // visible in every chart screenshot. follow_cross + rect (both
+          // real, verified enum values) only show the tooltip while
+          // actively hovering, on its own solid background -- --surface-2/
+          // --border's own dark hex values (theme.css), not klinecharts'
+          // own light-theme rect defaults, which would look washed out
+          // against this app's dark chart background regardless of the
+          // page's own light/dark theme (this chart's own colors are all
+          // hardcoded hex throughout, not CSS-var-driven, since canvas
+          // can't read custom properties).
+          tooltip: {
+            showRule: "follow_cross", showType: "rect",
+            rect: { color: "#141b2a", borderColor: "#1f293b", borderSize: 1, borderRadius: 4 },
+            text: { color: "#8892a6" },
+          },
         },
+        // The MA/VOL sub-indicator name+value labels ("MA5: 4,579K",
+        // "VOL(5,10,20)...") are a SEPARATE style namespace from candle's
+        // own tooltip above -- confirmed against the real bundle: this
+        // one's own default tooltip has no `rect` sub-object at all (only
+        // candle's does), so only showRule is set here, not showType/rect
+        // -- still the fix that matters, since showRule: "always" (the
+        // default) was the other half of these labels sitting permanently
+        // over the MA lines/volume bars regardless of any background.
+        indicator: { tooltip: { showRule: "follow_cross", text: { color: "#8892a6" } } },
         xAxis: { axisLine: { color: "#1f293b" }, tickText: { color: "#5a6478" } },
         yAxis: { axisLine: { color: "#1f293b" }, tickText: { color: "#5a6478" } },
         crosshair: { horizontal: { line: { color: "#2dd4bf" } }, vertical: { line: { color: "#2dd4bf" } } },
