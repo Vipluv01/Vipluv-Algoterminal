@@ -922,18 +922,26 @@ a:hover { text-decoration: underline; }
 .symbol-stats-header .stat-label { margin-bottom: 3px; }
 .symbol-stats-header .stat-value { font-size: 15px; }
 
-/* Live-mode symbol search (Terminal.js's LiveSymbolSearch) -- a
-   type-to-filter dropdown over the real ~2000+ equity universe, distinct
-   from the curated .chip strip's fixed 7 names. */
-.live-symbol-search { position: relative; margin-bottom: 12px; max-width: 360px; }
-.live-symbol-results {
+/* Symbol search (components/SymbolSearch.js) -- a type-to-filter dropdown
+   used by every mode's own tradable universe: live mode's real ~2000+
+   equities (via LiveSymbolSearch's wrapper) and paper/virtual's own
+   (smaller, locally-known) universe alike -- one search UI, whatever
+   list it's handed. Replaces the old fixed .chip button strip as the
+   PRIMARY way to pick a symbol in Terminal.js, across all 3 modes. */
+.symbol-search { position: relative; margin-bottom: 12px; max-width: 360px; }
+.symbol-search-results {
   position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 20;
   max-height: 260px; overflow-y: auto;
   background: var(--surface); border: 1px solid var(--border-bright); border-radius: var(--radius);
   box-shadow: var(--shadow-card);
 }
-.live-symbol-result { padding: 8px 12px; font-size: 12.5px; font-weight: 600; cursor: pointer; }
-.live-symbol-result:hover { background: var(--surface-hover); }
+.symbol-search-result { padding: 8px 12px; font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.symbol-search-result:hover { background: var(--surface-hover); }
+
+/* Recently-viewed symbol chips (Terminal.js) -- reuses .chip's own shape,
+   just in its own labeled row below the search bar. */
+.recent-symbols { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+.recent-symbols-label { font-size: 10.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; margin-right: 2px; }
 
 /* Chart toolbar "neon" active state -- a distinct treatment from the
    buy/sell/neutral toggle-row states above, reserved for the chart's own

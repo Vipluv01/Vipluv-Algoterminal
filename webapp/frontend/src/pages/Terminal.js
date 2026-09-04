@@ -9,6 +9,7 @@ import { AccountPanel } from "../components/AccountPanel.js";
 import { TimeAndSales } from "../components/TimeAndSales.js";
 import { ErrorBoundary } from "../components/ErrorBoundary.js";
 import { LiveSymbolSearch } from "../components/LiveSymbolSearch.js";
+import { SymbolSearch } from "../components/SymbolSearch.js";
 import { DEFAULT_STALE_THRESHOLD_MS, useStaleness } from "../clock.js";
 import { useMode } from "../mode.js";
 
@@ -124,14 +125,51 @@ function SymbolStatsHeader({ symbol, price, mode, stats }) {
   `;
 }
 
-function SymbolTabs({ symbols, active, onSelect, ticks }) {
+const RECENT_SYMBOLS_LIMIT = 8;
+
+// Per-mode recency, in localStorage -- paper/virtual/live each have their
+// own tradable universe (see Terminal()'s own visibleSymbols comment), so
+// a symbol recently viewed in one mode isn't necessarily even valid in
+// another; keying by mode keeps the three lists from bleeding into each
+// other, the same isolation the search bar itself already has (a
+// different `names` list per mode). Persisted (not just component state)
+// so "recently viewed" actually survives a page reload, which is the
+// point of it as a quick-access shortcut.
+function useRecentSymbols(mode, active) {
+  const storageKey = `terminal_recent_symbols_${mode}`;
+  const readStored = () => {
+    try { return JSON.parse(localStorage.getItem(storageKey)) || []; } catch { return []; }
+  };
+  const [recent, setRecent] = React.useState(readStored);
+
+  React.useEffect(() => {
+    setRecent(readStored());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
+
+  React.useEffect(() => {
+    if (!active) return;
+    setRecent((prev) => {
+      const next = [active, ...prev.filter((s) => s !== active)].slice(0, RECENT_SYMBOLS_LIMIT);
+      try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch { /* storage unavailable -- recency just won't persist */ }
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, mode]);
+
+  return recent;
+}
+
+function RecentSymbols({ recent, active, ticks, onSelect }) {
+  if (!recent.length) return null;
   return html`
-    <div style=${{ display: "flex", gap: "8px", overflowX: "auto", paddingBottom: "4px", marginBottom: "16px" }}>
-      ${symbols.map((s) => {
-        const t = ticks[s.symbol];
+    <div class="recent-symbols">
+      <span class="recent-symbols-label">Recently viewed</span>
+      ${recent.map((sym) => {
+        const t = ticks[sym];
         return html`
-          <div key=${s.symbol} class=${`chip ${active === s.symbol ? "active" : ""}`} onClick=${() => onSelect(s.symbol)}>
-            <span style=${{ fontWeight: 700 }}>${s.symbol}</span>
+          <div key=${sym} class=${`chip ${active === sym ? "active" : ""}`} onClick=${() => onSelect(sym)}>
+            <span style=${{ fontWeight: 700 }}>${sym}</span>
             ${t?.price && html`<span class="mono" style=${{ marginLeft: "8px", color: "var(--text-dim)" }}>${fmtMoney(t.price)}</span>`}
           </div>
         `;
@@ -234,6 +272,7 @@ export function Terminal() {
 
   const tick = ticks[active];
   const stats = useSymbolStats(active, tradingMode);
+  const recentSymbols = useRecentSymbols(tradingMode, active);
   // Live mode's WS tick carries NO depth (Angel One's LTP-mode stream,
   // confirmed -- see live_market.py's own _live_tick_to_payload). Merge
   // in the REAL depth useSymbolStats already polled via getMarketData's
@@ -277,9 +316,12 @@ export function Terminal() {
         </div>
       </div>
 
-      ${tradingMode === "live" && html`<${LiveSymbolSearch} onSelect=${setActive} />`}
+      ${tradingMode === "live"
+        ? html`<${LiveSymbolSearch} onSelect=${setActive} />`
+        : html`<${SymbolSearch} names=${visibleSymbols.map((s) => s.symbol)} onSelect=${setActive}
+                                placeholder=${`Search ${visibleSymbols.length} tradable stocks…`} />`}
 
-      <${SymbolTabs} symbols=${visibleSymbols} active=${active} onSelect=${setActive} ticks=${ticks} />
+      <${RecentSymbols} recent=${recentSymbols} active=${active} ticks=${ticks} onSelect=${setActive} />
 
       ${active && html`
         <${ErrorBoundary} label="Symbol Stats">

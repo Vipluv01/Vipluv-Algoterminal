@@ -120,8 +120,15 @@ export const api = {
   },
 
   dashboard: {
-    stats: () => request("GET", "/dashboard/stats"),
-    calendar: () => request("GET", "/dashboard/calendar"),
+    // mode defaults to "paper" server-side too -- passed explicitly (not
+    // omitted) so this always reflects whichever mode is actually
+    // selected, not a hardcoded paper-only view. Real bug this fixes,
+    // 2026-09-04: the dashboard used to ALWAYS show paper-mode numbers
+    // regardless of the selected mode, with only a banner explaining that
+    // -- confusing enough on its own screenshot that it needed asking
+    // about directly.
+    stats: (mode) => request("GET", `/dashboard/stats?mode=${mode}`),
+    calendar: (mode) => request("GET", `/dashboard/calendar?mode=${mode}`),
     // Notes now live entirely under /journal -- /dashboard/notes was
     // removed server-side (see app/routers/journal.py's module docstring),
     // not duplicated, so there is exactly one place notes are read or

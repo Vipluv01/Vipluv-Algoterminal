@@ -7,9 +7,9 @@ import { fmtMoney, fmtNum } from "../format.js";
 // third number per row: "how much size is available AT OR BETTER than
 // this level," which is what a trader sizing an order against the book
 // actually needs, not just what's resting at one specific price.
-function DepthRows({ levels, side, onLevelClick, flashes }) {
+function DepthRows({ levels, side, onLevelClick, flashes, loading }) {
   if (!levels.length) {
-    return html`<div class="row" style=${{ color: "var(--text-faint)", justifyContent: "center" }}>no resting orders</div>`;
+    return html`<div class="row" style=${{ color: "var(--text-faint)", justifyContent: "center" }}>${loading ? "Loading order book…" : "no resting orders"}</div>`;
   }
   const maxQty = Math.max(...levels.map((l) => l.qty));
   let running = 0;
@@ -63,10 +63,10 @@ function useFlashLevels(bids, asks) {
 // of distance from mid price, both sides sharing one Y scale so their
 // relative size is directly comparable at a glance -- not just two
 // separate bar lists (DepthRows above), the actual point of a depth view.
-function DepthChart({ bids, asks }) {
+function DepthChart({ bids, asks, loading }) {
   const W = 500, H = 160;
   if (!bids.length && !asks.length) {
-    return html`<div style=${{ height: `${H}px`, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-faint)", fontSize: "12px" }}>No resting orders</div>`;
+    return html`<div style=${{ height: `${H}px`, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-faint)", fontSize: "12px" }}>${loading ? "Loading order book…" : "No resting orders"}</div>`;
   }
 
   // bids/asks already arrive best-first (closest to mid) per the backend's
@@ -120,6 +120,14 @@ function Stat({ label, value, valueClass = "" }) {
 
 export function OrderBook({ tick, stale = false, onLevelClick }) {
   const [view, setView] = React.useState("book");
+  // Distinguishes "no tick has arrived at all yet" (tick === undefined/null
+  // -- e.g. the gap between selecting a symbol and the WS delivering its
+  // first message) from "a tick DID arrive and the book is genuinely
+  // empty right now" (tick.bids/asks === [], a real, honest state -- e.g.
+  // a derived index with no order book at all). Both used to render the
+  // identical "no resting orders" text, which read as a broken/missing
+  // book during the loading gap specifically -- this is that fix.
+  const loading = tick == null;
   const bids = tick?.bids || [];
   const asks = tick?.asks || [];
   const mid = tick?.best_bid && tick?.best_ask ? (tick.best_bid + tick.best_ask) / 2 : tick?.price;
@@ -145,9 +153,9 @@ export function OrderBook({ tick, stale = false, onLevelClick }) {
             <div class="row" style=${{ color: "var(--text-faint)", fontSize: "10px", padding: "0 8px" }}>
               <span>Price</span><span class="mono">Qty</span><span class="mono">Cum</span>
             </div>
-            <${DepthRows} levels=${asks} side="ask" onLevelClick=${onLevelClick} flashes=${flashes} />
+            <${DepthRows} levels=${asks} side="ask" onLevelClick=${onLevelClick} flashes=${flashes} loading=${loading} />
             <div class="mid-row">${mid ? fmtMoney(mid) : "—"}</div>
-            <${DepthRows} levels=${bids} side="bid" onLevelClick=${onLevelClick} flashes=${flashes} />
+            <${DepthRows} levels=${bids} side="bid" onLevelClick=${onLevelClick} flashes=${flashes} loading=${loading} />
           <//>
         `
         : html`
@@ -158,7 +166,7 @@ export function OrderBook({ tick, stale = false, onLevelClick }) {
               <${Stat} label="Best Ask" value=${tick?.best_ask ? fmtMoney(tick.best_ask) : "—"} valueClass="neg" />
               <${Stat} label="Spread" value=${spread !== null ? fmtMoney(spread) : "—"} />
             </div>
-            <${DepthChart} bids=${bids} asks=${asks} />
+            <${DepthChart} bids=${bids} asks=${asks} loading=${loading} />
             <div style=${{ marginTop: "10px" }}>
               <div style=${{ display: "flex", justifyContent: "space-between", fontSize: "10.5px", marginBottom: "4px" }}>
                 <span class="pos">BID ${bidPct.toFixed(0)}%</span>
