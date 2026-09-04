@@ -195,6 +195,24 @@ def _apply_fill(state: _WalkState, o: Order) -> float | None:
     return realized_amount
 
 
+def _mark_to_market(state: _WalkState, price_lookup: PriceLookup, at: object) -> float:
+    """Cash plus every then-open position valued at `at`'s own historical
+    price (falling back to that position's own average entry price when
+    the lookup has no history for a symbol -- e.g. a synthetic option
+    contract). Shared by _walk_fills (a full walk) and
+    get_cached_equity_curve below (an incremental, resumed one) so this
+    mark-to-market step exists in exactly one place."""
+    mark_to_market = state.cash
+    for pos_sym, pos_qty in state.qty.items():
+        if pos_qty == 0:
+            continue
+        mark = price_lookup(pos_sym, at)
+        if mark is None:
+            mark = state.avg_px[pos_sym]
+        mark_to_market += pos_qty * mark
+    return mark_to_market
+
+
 def _walk_fills(orders: list[Order], starting_cash: float, price_lookup: PriceLookup | None = None) -> _WalkResult:
     """Single shared pass over every fill in chronological order,
     maintaining running qty/avg-entry-price/realized-P&L per symbol via
@@ -235,16 +253,8 @@ def _walk_fills(orders: list[Order], starting_cash: float, price_lookup: PriceLo
         ))
 
         if price_lookup is not None:
-            mark_to_market = state.cash
-            for pos_sym, pos_qty in state.qty.items():
-                if pos_qty == 0:
-                    continue
-                mark = price_lookup(pos_sym, o.created_at)
-                if mark is None:
-                    mark = state.avg_px[pos_sym]
-                mark_to_market += pos_qty * mark
             result.equity_points.append(EquityPoint(
-                order_id=o.id, created_at=o.created_at, equity=mark_to_market,
+                order_id=o.id, created_at=o.created_at, equity=_mark_to_market(state, price_lookup, o.created_at),
             ))
 
     result.qty = state.qty
@@ -373,6 +383,13 @@ def get_cached_account_snapshot(
     key = (user_id, mode, sub_account_id, only_primary)
     with _account_cache_lock:
         state = _account_cache.get(key)
+
+        base_query = db.query(Order).filter(Order.user_id == user_id, Order.mode == mode)
+        if sub_account_id is not None:
+            base_query = base_query.filter(Order.sub_account_id == sub_account_id)
+        elif only_primary:
+            base_query = base_query.filter(Order.sub_account_id.is_(None))
+
         if state is not None and state.last_order_id:
             # Guard against a stale cache outliving the very order history
             # it was built from. No code path in this app ever deletes an
@@ -390,17 +407,22 @@ def get_cached_account_snapshot(
             # here (not a size-dependent cost) catches that and falls
             # back to a full rebuild, the same cold-start cost the very
             # first call for a key already pays.
-            watermark_still_exists = db.query(Order.id).filter(Order.id == state.last_order_id).first()
+            #
+            # Scoped through base_query (user_id/mode/sub_account_id),
+            # not a bare Order.id == ... lookup -- a bare lookup only
+            # confirms SOME order with that id exists ANYWHERE, which a
+            # fresh test database can satisfy by coincidence (ids restart
+            # at 1 in every fresh in-memory SQLite DB) even though it
+            # belongs to a completely different user/mode. Confirmed live
+            # in this file's own test suite: a bare check let exactly this
+            # cross-mode leak through silently.
+            watermark_still_exists = base_query.filter(Order.id == state.last_order_id).first()
             if watermark_still_exists is None:
                 state = None
         if state is None:
             state = _WalkState(cash=starting_cash)
 
-        query = db.query(Order).filter(Order.user_id == user_id, Order.mode == mode)
-        if sub_account_id is not None:
-            query = query.filter(Order.sub_account_id == sub_account_id)
-        elif only_primary:
-            query = query.filter(Order.sub_account_id.is_(None))
+        query = base_query
         if state.last_order_id:
             query = query.filter(Order.id > state.last_order_id)
 
@@ -466,16 +488,20 @@ def get_cached_realizations(
     key = (user_id, mode)
     with _realizations_cache_lock:
         entry = _realizations_cache.get(key)
+        base_query = db.query(Order).filter(Order.user_id == user_id, Order.mode == mode)
+
         if entry is not None and entry.state.last_order_id:
-            # Same staleness guard as get_cached_account_snapshot, and for
-            # the same real reason -- see that function's own comment.
-            watermark_still_exists = db.query(Order.id).filter(Order.id == entry.state.last_order_id).first()
+            # Same staleness guard as get_cached_account_snapshot, scoped
+            # through base_query for the same reason -- see that
+            # function's own comment on why a bare Order.id == ... lookup
+            # isn't enough.
+            watermark_still_exists = base_query.filter(Order.id == entry.state.last_order_id).first()
             if watermark_still_exists is None:
                 entry = None
         if entry is None:
             entry = _RealizationsCacheEntry(state=_WalkState(cash=starting_cash))
 
-        query = db.query(Order).filter(Order.user_id == user_id, Order.mode == mode)
+        query = base_query
         if entry.state.last_order_id:
             query = query.filter(Order.id > entry.state.last_order_id)
 
@@ -512,3 +538,134 @@ def compute_equity_curve(
     price curve by forgetting to pass one; app/routers/account.py builds
     a real one from SymbolMarket.price_history."""
     return _walk_fills(orders, starting_cash, price_lookup=price_lookup).equity_points
+
+
+# ---------------------------------------------------------------------------
+# Incremental, cached curves -- get_cached_realized_pnl_curve and
+# get_cached_equity_curve below are the SAME fix as get_cached_account_
+# snapshot/get_cached_realizations above, applied to the two remaining
+# endpoints that were still re-walking a user's ENTIRE order history on
+# every call: GET /portfolio/realized-pnl-curve and GET /account (or
+# /virtual)/equity-curve. Deliberately NOT folded into
+# get_cached_realizations: that cache's own output (a realizations LIST)
+# happens to be exactly what dashboard_stats needs and nothing more, while
+# a curve needs one point per fill (realizing or not) -- a different
+# shape, so a third and fourth cache, not a third consumer of the second.
+#
+# Both are keyed by (user_id, mode) only, always scoped to
+# Order.sub_account_id.is_(None) -- matching the ONE real caller each of
+# these has today (app/routers/portfolio.py's realized-pnl-curve,
+# app/routers/account.py and virtual.py's own equity-curve), none of
+# which ever wanted a sub-account-scoped view. If a sub-account-scoped
+# curve is ever needed, this key shape would need extending the same way
+# _account_cache's own (user_id, mode, sub_account_id, only_primary) key
+# already does -- not attempted here since nothing calls for it yet.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _RealizedPnlCurveCacheEntry:
+    state: _WalkState
+    points: list[RealizedPnlPoint] = field(default_factory=list)
+
+
+_realized_pnl_curve_cache: dict[tuple[int, Mode], _RealizedPnlCurveCacheEntry] = {}
+_realized_pnl_curve_cache_lock = threading.Lock()
+
+
+def get_cached_realized_pnl_curve(
+    db: Session, user_id: int, mode: Mode, starting_cash: float = STARTING_PAPER_CASH_DEFAULT,
+) -> list[RealizedPnlPoint]:
+    """Incremental counterpart to compute_realized_pnl_curve, for GET
+    /portfolio/realized-pnl-curve. Fixed a real bug found alongside this
+    one, 2026-09-04: the un-cached call site never passed starting_cash
+    at all, so every point on a VIRTUAL-mode curve was silently offset by
+    paper's ~Rs 1 lakh baseline instead of virtual's real ~Rs 1 crore --
+    the same class of bug just fixed in
+    app/routers/portfolio.py's _portfolio_weights_and_returns, just in a
+    second place. Now genuinely mode-aware, same as every other cache
+    here."""
+    key = (user_id, mode)
+    with _realized_pnl_curve_cache_lock:
+        entry = _realized_pnl_curve_cache.get(key)
+        base_query = db.query(Order).filter(Order.user_id == user_id, Order.mode == mode, Order.sub_account_id.is_(None))
+
+        if entry is not None and entry.state.last_order_id:
+            # Scoped through base_query, not a bare Order.id == ... lookup
+            # -- see get_cached_account_snapshot's own comment on why a
+            # bare lookup can be fooled by a fresh test database reusing
+            # small ids (confirmed live: this exact endpoint's own test
+            # suite caught a cross-mode leak from the unscoped version).
+            watermark_still_exists = base_query.filter(Order.id == entry.state.last_order_id).first()
+            if watermark_still_exists is None:
+                entry = None
+        if entry is None:
+            entry = _RealizedPnlCurveCacheEntry(state=_WalkState(cash=starting_cash))
+
+        query = base_query
+        if entry.state.last_order_id:
+            query = query.filter(Order.id > entry.state.last_order_id)
+
+        new_orders = _filled_orders_only(query.order_by(Order.id).all())
+        for o in new_orders:
+            _apply_fill(entry.state, o)
+            entry.points.append(RealizedPnlPoint(
+                order_id=o.id, created_at=o.created_at,
+                realized_pnl=starting_cash + sum(entry.state.realized_by_symbol.values()),
+            ))
+
+        _realized_pnl_curve_cache[key] = entry
+        return list(entry.points)
+
+
+@dataclass
+class _EquityCurveCacheEntry:
+    state: _WalkState
+    points: list[EquityPoint] = field(default_factory=list)
+
+
+_equity_curve_cache: dict[tuple[int, Mode], _EquityCurveCacheEntry] = {}
+_equity_curve_cache_lock = threading.Lock()
+
+
+def get_cached_equity_curve(
+    db: Session, user_id: int, mode: Mode, price_lookup: PriceLookup,
+    starting_cash: float = STARTING_PAPER_CASH_DEFAULT,
+) -> list[EquityPoint]:
+    """Incremental counterpart to compute_equity_curve, for GET /account/
+    equity-curve and GET /virtual/equity-curve. price_lookup is called
+    fresh for every NEW fill folded in on this call (never for fills
+    already cached from a previous call) -- correct as long as the
+    caller's own price_lookup always answers the same historical price
+    for a given (symbol, timestamp) pair no matter when it's asked, which
+    both real callers' own historical_price_lookup(registry) already
+    guarantees (it reads a fixed, already-recorded price_history array,
+    not a live-only value)."""
+    key = (user_id, mode)
+    with _equity_curve_cache_lock:
+        entry = _equity_curve_cache.get(key)
+        base_query = db.query(Order).filter(Order.user_id == user_id, Order.mode == mode, Order.sub_account_id.is_(None))
+
+        if entry is not None and entry.state.last_order_id:
+            # Scoped through base_query -- see get_cached_account_
+            # snapshot's own comment on why a bare Order.id == ... lookup
+            # isn't enough.
+            watermark_still_exists = base_query.filter(Order.id == entry.state.last_order_id).first()
+            if watermark_still_exists is None:
+                entry = None
+        if entry is None:
+            entry = _EquityCurveCacheEntry(state=_WalkState(cash=starting_cash))
+
+        query = base_query
+        if entry.state.last_order_id:
+            query = query.filter(Order.id > entry.state.last_order_id)
+
+        new_orders = _filled_orders_only(query.order_by(Order.id).all())
+        for o in new_orders:
+            _apply_fill(entry.state, o)
+            entry.points.append(EquityPoint(
+                order_id=o.id, created_at=o.created_at,
+                equity=_mark_to_market(entry.state, price_lookup, o.created_at),
+            ))
+
+        _equity_curve_cache[key] = entry
+        return list(entry.points)

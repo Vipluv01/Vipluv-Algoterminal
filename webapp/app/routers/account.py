@@ -8,12 +8,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.accounting import compute_equity_curve, get_cached_account_snapshot
+from app.accounting import get_cached_account_snapshot, get_cached_equity_curve
 from app.auth import get_current_user
 from app.db import get_db
 from app.market_price_lookup import historical_price_lookup
 from app.markets import MarketRegistry
-from app.models.trading import Mode, Order, SubAccount
+from app.models.trading import Mode, SubAccount
 from app.models.user import User
 from app.options.execution import mark_option_positions
 from app.routers.orders import get_registry
@@ -102,12 +102,13 @@ def get_equity_curve(
     # position to price_history's own value at each fill's timestamp,
     # not just cumulative realized P&L -- this is what agrees with
     # GET /account's total_value at every point where no fill is pending.
-    orders = (
-        db.query(Order)
-        .filter(Order.user_id == user.id, Order.mode == Mode.paper, Order.sub_account_id.is_(None))
-        .all()
-    )
-    return compute_equity_curve(orders, price_lookup=historical_price_lookup(registry))
+    #
+    # get_cached_equity_curve, not a fresh db.query(Order)...all() + a
+    # full compute_equity_curve walk -- this endpoint re-walked a user's
+    # ENTIRE order history from scratch on every call, the same latency
+    # bug already fixed for GET /account and GET /dashboard/stats (see
+    # get_cached_equity_curve's own docstring).
+    return get_cached_equity_curve(db, user.id, Mode.paper, historical_price_lookup(registry))
 
 
 # --- Sub-accounts ------------------------------------------------------

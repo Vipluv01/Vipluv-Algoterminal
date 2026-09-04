@@ -18,11 +18,16 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.accounting import compute_realized_pnl_curve, get_cached_account_snapshot
+from app.accounting import (
+    STARTING_PAPER_CASH_DEFAULT,
+    STARTING_VIRTUAL_CASH_DEFAULT,
+    get_cached_account_snapshot,
+    get_cached_realized_pnl_curve,
+)
 from app.auth import get_current_user
 from app.db import get_db
 from app.markets import MarketRegistry
-from app.models.trading import Mode, Order, SubAccount
+from app.models.trading import Mode, SubAccount
 from app.models.user import User
 from app.options.execution import mark_option_positions
 from app.quant.attribution import BENCHMARK_SYMBOLS, brinson_attribution
@@ -76,7 +81,17 @@ def _portfolio_weights_and_returns(
     db: Session, user: User, registry: MarketRegistry, mode: Mode,
 ) -> tuple[dict[str, float], dict[str, float], float, str | None]:
     prices = {**registry.current_prices(), **mark_option_positions(db, user.id, registry)}
-    snapshot = get_cached_account_snapshot(db, user.id, mode, prices, only_primary=True)
+    # Real bug fixed 2026-09-04: this always used the default (paper's
+    # STARTING_PAPER_CASH_DEFAULT), even for mode=virtual -- get_attribution
+    # accepts "virtual" (see its own docstring), but nothing here ever
+    # passed virtual's own STARTING_VIRTUAL_CASH_DEFAULT starting cash, so
+    # a virtual account's very first attribution computation (whichever
+    # endpoint populates get_cached_account_snapshot's cache for this
+    # user/mode first) could silently start from paper's ~Rs 1 lakh
+    # instead of virtual's real Rs 1 crore, skewing cash weight and
+    # portfolio_return until the next process restart or cache rebuild.
+    starting_cash = STARTING_VIRTUAL_CASH_DEFAULT if mode == Mode.virtual else STARTING_PAPER_CASH_DEFAULT
+    snapshot = get_cached_account_snapshot(db, user.id, mode, prices, starting_cash, only_primary=True)
 
     if snapshot.total_value <= 0:
         return {}, {}, snapshot.total_value, "account total_value is not positive -- nothing to attribute"
@@ -173,12 +188,17 @@ def get_portfolio_realized_pnl_curve(
     # Same only_primary scoping as GET /account/equity-curve -- the
     # realized (fill-indexed) walk, not mark-to-market; see
     # accounting.compute_realized_pnl_curve's own docstring.
-    orders = (
-        db.query(Order)
-        .filter(Order.user_id == user.id, Order.mode == Mode(mode), Order.sub_account_id.is_(None))
-        .all()
-    )
-    return compute_realized_pnl_curve(orders)
+    #
+    # get_cached_realized_pnl_curve, not a fresh full-history fetch+walk
+    # -- same latency fix as everything else in this file. Also fixes a
+    # real bug found alongside it: this call never passed starting_cash,
+    # so a virtual-mode curve was silently offset by paper's ~Rs 1 lakh
+    # baseline instead of virtual's own ~Rs 1 crore (see that function's
+    # own docstring) -- the same class of bug just fixed in
+    # _portfolio_weights_and_returns above, in a second place.
+    mode_enum = Mode(mode)
+    starting_cash = STARTING_VIRTUAL_CASH_DEFAULT if mode_enum == Mode.virtual else STARTING_PAPER_CASH_DEFAULT
+    return get_cached_realized_pnl_curve(db, user.id, mode_enum, starting_cash)
 
 
 class SubAccountBreakdownOut(BaseModel):

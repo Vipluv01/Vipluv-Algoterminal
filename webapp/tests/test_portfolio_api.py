@@ -84,6 +84,43 @@ def test_attribution_mode_paper_and_virtual_do_not_bleed_into_each_other(client)
     assert virtual["computable"] is True
 
 
+def test_attribution_uses_virtuals_own_starting_cash_not_papers(client):
+    """Regression test for a real bug found 2026-09-04:
+    _portfolio_weights_and_returns always called get_cached_account_
+    snapshot without passing starting_cash, so it silently defaulted to
+    STARTING_PAPER_CASH_DEFAULT even for mode=virtual. Unobservable for a
+    cash-only account (cash/total_value == 1.0 regardless of the actual
+    starting figure), so this needs a real open position AND to be the
+    very first caller to populate the cache for this user/mode -- a BUY
+    order would already warm it correctly via orders.py's own buying-
+    power check (get_cached_account_snapshot is called there with the
+    right starting_cash first), silently masking the bug. A SELL order
+    opening a short has no such check (routers/orders.py's own buying-
+    power gate is BUY-only), so it's the one path that leaves
+    /portfolio/attribution genuinely first to touch this cache key --
+    confirmed this test actually catches the bug by reverting the fix and
+    watching it fail before writing it this way."""
+    from app.accounting import STARTING_VIRTUAL_CASH_DEFAULT
+
+    sell = client.post("/orders", json={
+        "symbol": "ICICIBANK", "side": "sell", "order_type": "market", "qty": 5, "mode": "virtual",
+    }).json()
+    assert sell["filled_qty"] == 5
+
+    attribution = client.get("/portfolio/attribution", params={"mode": "virtual"}).json()
+    assert attribution["computable"] is True
+
+    account = client.get("/virtual/account").json()
+    # If the bug were present, the attribution call above would have
+    # seeded the shared cache with paper's ~Rs 1 lakh starting cash
+    # instead of virtual's real ~Rs 1 crore -- /virtual/account reads
+    # that SAME cached state (its own correct starting_cash argument is
+    # ignored once the cache is already populated), so its own cash
+    # figure would come back on the wrong scale too.
+    assert account["cash"] > STARTING_VIRTUAL_CASH_DEFAULT * 0.9
+    assert account["total_value"] > STARTING_VIRTUAL_CASH_DEFAULT * 0.9
+
+
 def test_attribution_rejects_live_as_a_mode(client):
     # There is no real mark-to-market registry or benchmark price source
     # for live positions yet (see get_attribution's own docstring) --
