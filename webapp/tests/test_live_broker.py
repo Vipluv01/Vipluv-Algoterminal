@@ -418,10 +418,19 @@ def test_resolve_equity_symbol_caches_a_successful_result(fake_client):
     assert sum(1 for c in adapter._client.calls if c[0] == "searchScrip") == 1
 
 
-def test_resolve_equity_symbol_does_not_cache_a_failed_resolution(fake_client):
+def test_resolve_equity_symbol_does_not_cache_a_failed_resolution_forever(fake_client):
     """A transient search failure (or a genuinely unresolvable symbol,
-    e.g. TATAMOTORS post-demerger) must not be remembered as permanent --
-    only a SUCCESSFUL resolution is cache-worthy."""
+    e.g. TATAMOTORS post-demerger) must not be remembered as PERMANENT --
+    only a SUCCESSFUL resolution is cached without expiry. Real bug fixed
+    2026-09-05 changed this from "never cached at all" to "cached for a
+    short TTL" (see AngelOneAdapter._failed_resolution_at's own docstring
+    for the real incident -- an unbounded retry storm during a genuine
+    Angel One outage that starved the single-concurrency semaphore of
+    every OTHER live request): confirmed here that a retry BEFORE the TTL
+    elapses is still throttled (the point of the fix), and a retry AFTER
+    it elapses still recovers (the original test's own point, preserved)
+    -- simulated by directly backdating the internal timestamp rather
+    than a real 20s sleep, to keep this test fast."""
     adapter = AngelOneAdapter(_creds())
     adapter.login()
     adapter._client.search_scrip_result = {"status": True, "data": []}
@@ -433,6 +442,16 @@ def test_resolve_equity_symbol_does_not_cache_a_failed_resolution(fake_client):
         "status": True,
         "data": [{"exchange": "NSE", "tradingsymbol": "TATAMOTORS-EQ", "symboltoken": "999"}],
     }
+    calls_before_retry = sum(1 for c in adapter._client.calls if c[0] == "searchScrip")
+
+    # Still within the TTL -- the new throttle rejects this WITHOUT a real
+    # network call, even though the underlying data would now succeed.
+    with pytest.raises(AngelOneError):
+        adapter.resolve_equity_symbol("NSE", "TATAMOTORS")
+    assert sum(1 for c in adapter._client.calls if c[0] == "searchScrip") == calls_before_retry
+
+    # Backdate the failure past the TTL -- a real recovery is picked up.
+    adapter._failed_resolution_at[("NSE", "TATAMOTORS")] -= 999
     result = adapter.resolve_equity_symbol("NSE", "TATAMOTORS")
     assert result["tradingsymbol"] == "TATAMOTORS-EQ"
 

@@ -81,6 +81,16 @@ def _is_rate_limited(exc: Exception) -> bool:
 # wrong order of magnitude.
 _RATE_LIMIT_RETRY_DELAY_SECONDS = 1.5
 
+# How long a FAILED resolve_equity_symbol result is remembered before the
+# next call for that (exchange, symbol) is allowed to hit the real API
+# again -- see self._failed_resolution_at's own docstring for the real
+# incident (an unbounded retry storm during a genuine Angel One outage)
+# this exists to bound. 20s: short enough that a real recovery is picked
+# up well within one Ticker.js/useSymbolStats poll cycle (30s) of it
+# actually happening, long enough that a sustained outage costs at most
+# one real network round trip per symbol per 20s, not one per poll.
+_FAILED_RESOLUTION_TTL_SECONDS = 20.0
+
 # SmartWebSocketV2's exchangeType codes (see its own docstring on
 # subscribe()) -- NSE cash-market equities is what every symbol this app
 # trades (NAMED_INSTRUMENTS-style tickers) lives on.
@@ -222,6 +232,29 @@ class AngelOneAdapter:
         # that looks the same symbol up more than once -- which Ticker.js's
         # own 30s poll cycle does, every cycle, for every symbol, forever.
         self._resolved_symbol_cache: dict[tuple[str, str], dict] = {}
+        # Short-TTL negative cache for a FAILED resolution -- see resolve_
+        # equity_symbol's own docstring for why a failure was never cached
+        # at all before this: a genuinely transient blip shouldn't be
+        # remembered as permanent. That reasoning is still right for a
+        # ONE-OFF failure, but it has a real gap for a SUSTAINED one:
+        # confirmed live, 2026-09-04/05 -- a real Angel One outage
+        # (searchScrip returning "INTERNAL SERVER ERROR" for every named
+        # instrument) combined with every poller that resolves a symbol
+        # (Ticker.js every 30s, Terminal.js's useSymbolStats every 30s per
+        # active symbol) having NOTHING to stop it retrying on the very
+        # next cycle turned one broker-side outage into an unthrottled
+        # retry storm against this adapter's own single-concurrency
+        # _call_semaphore -- every OTHER live request (a chart's own
+        # history fetch, quotes, order confirmation) queued behind it
+        # indefinitely, which is what actually produced "the chart never
+        # renders, live mode is completely stuck" rather than just one
+        # symbol's own quote being briefly unavailable. A short TTL here
+        # (not permanent, not zero) is the fix: a real recovery is still
+        # picked up within _FAILED_RESOLUTION_TTL_SECONDS of it actually
+        # happening, but a sustained outage no longer costs a real network
+        # round trip -- and the semaphore's own queue slot -- on every
+        # single poll.
+        self._failed_resolution_at: dict[tuple[str, str], float] = {}
 
     # -- session -------------------------------------------------------
 
@@ -411,33 +444,53 @@ class AngelOneAdapter:
         to cache (a static identifier, not a price) and why it matters
         (this is the single biggest real-call reduction available: every
         repeat lookup of a symbol this adapter has already resolved skips
-        the network entirely). A FAILED resolution is never cached --
-        a transient search failure shouldn't be remembered as permanent.
+        the network entirely). A FAILED resolution is remembered only
+        briefly (_FAILED_RESOLUTION_TTL_SECONDS, see self._failed_
+        resolution_at's own docstring for the real incident this closes)
+        -- long enough to stop every poller from retrying the exact same
+        failing call on its own very next cycle, short enough that a
+        real recovery (or a typo the caller corrects) is never stuck
+        behind a stale rejection for long.
         """
         cache_key = (exchange, symbol)
         cached = self._resolved_symbol_cache.get(cache_key)
         if cached is not None:
             return cached
 
-        matches = self.search_symbol_token(exchange, symbol)
-        expected = f"{symbol.upper()}-EQ"
-        equity_matches = [
-            m for m in matches
-            if m.get("exchange") == "NSE" and str(m.get("tradingsymbol", "")).upper() == expected
-        ]
-        if not equity_matches:
+        failed_at = self._failed_resolution_at.get(cache_key)
+        if failed_at is not None and time.monotonic() - failed_at < _FAILED_RESOLUTION_TTL_SECONDS:
             raise AngelOneError(
                 f"could not resolve {symbol!r} to a standard NSE equity instrument "
-                f"(found {len(matches)} matching series, none an exact {expected!r} match)"
+                f"(failed {time.monotonic() - failed_at:.0f}s ago -- not retrying yet, "
+                f"see _FAILED_RESOLUTION_TTL_SECONDS)"
             )
-        if len(equity_matches) > 1:
-            # Never silently pick one when the filter itself is ambiguous
-            # -- better to fail loudly than to guess with real money.
-            raise AngelOneError(
-                f"symbol {symbol!r} matched more than one NSE equity entry "
-                f"({[m.get('tradingsymbol') for m in equity_matches]}) -- refusing to guess"
-            )
+
+        try:
+            matches = self.search_symbol_token(exchange, symbol)
+            expected = f"{symbol.upper()}-EQ"
+            equity_matches = [
+                m for m in matches
+                if m.get("exchange") == "NSE" and str(m.get("tradingsymbol", "")).upper() == expected
+            ]
+            if not equity_matches:
+                raise AngelOneError(
+                    f"could not resolve {symbol!r} to a standard NSE equity instrument "
+                    f"(found {len(matches)} matching series, none an exact {expected!r} match)"
+                )
+            if len(equity_matches) > 1:
+                # Never silently pick one when the filter itself is
+                # ambiguous -- better to fail loudly than to guess with
+                # real money.
+                raise AngelOneError(
+                    f"symbol {symbol!r} matched more than one NSE equity entry "
+                    f"({[m.get('tradingsymbol') for m in equity_matches]}) -- refusing to guess"
+                )
+        except Exception:
+            self._failed_resolution_at[cache_key] = time.monotonic()
+            raise
+
         self._resolved_symbol_cache[cache_key] = equity_matches[0]
+        self._failed_resolution_at.pop(cache_key, None)
         return equity_matches[0]
 
     def place_order(
