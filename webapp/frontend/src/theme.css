@@ -793,6 +793,30 @@ textarea.input { font-family: var(--font-ui); resize: vertical; min-height: 60px
 .skeleton { background: linear-gradient(90deg, var(--surface) 25%, var(--surface-2) 50%, var(--surface) 75%); background-size: 200% 100%; animation: shimmer 1.4s infinite; border-radius: 6px; }
 @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
+/* Every BLOCK-shaped loading placeholder across the app carries the same
+   branded mark + label the boot screen itself uses (index.html's own
+   #boot-loading, same --accent teal, same pulse animation) -- added
+   2026-09-04 so "loading" reads consistently everywhere a section is
+   still fetching (a chart, an option chain, a strategy card, anything),
+   not just at the very first page load. :not(.skeleton-line) excludes
+   the small text-line placeholders (components/Skeleton.js's
+   SkeletonLine/SkeletonRow) -- those are 12px tall, far too short for a
+   mark+label to fit without looking broken, and a table full of them
+   repeating the same label on every row would be visual noise, not
+   signal, unlike the one-per-section block placeholders this targets. */
+.skeleton:not(.skeleton-line) {
+  display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 28px;
+}
+.skeleton:not(.skeleton-line)::before {
+  content: ""; width: 18px; height: 18px; border-radius: 5px; flex-shrink: 0;
+  background: var(--accent); animation: skeleton-mark-pulse 1.4s ease-in-out infinite;
+}
+.skeleton:not(.skeleton-line)::after {
+  content: "Loading VS Algoterminal…"; font-size: 11px; font-weight: 600;
+  letter-spacing: 0.02em; color: var(--text-faint);
+}
+@keyframes skeleton-mark-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
 .fade-in { animation: fadeIn .3s ease; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 
