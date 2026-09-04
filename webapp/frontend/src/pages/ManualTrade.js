@@ -3,6 +3,7 @@ import { html } from "../html.js";
 import { api, subscribeMarketForMode } from "../api.js";
 import { fmtMoney } from "../format.js";
 import { CandleChart } from "../components/CandleChart.js";
+import { BellCurve } from "../components/BellCurve.js";
 import { OrderModeBanner } from "../components/OrderModeBanner.js";
 import { LiveOrderConfirmModal } from "../components/LiveOrderConfirmModal.js";
 import { ErrorBoundary } from "../components/ErrorBoundary.js";
@@ -399,6 +400,23 @@ export function ManualTrade() {
                         <div class="stat-label">Current Position</div>
                         <div class="stat-value mono">${pairData.position === "none" ? "Flat" : pairData.position === "long_spread" ? "Long" : "Short"}</div>
                       </div>
+                    </div>
+                    <!-- Same real z-gauge the Pairs page's own Overview
+                         tab shows (BellCurve, fed by this SAME already-
+                         fetched pairData -- no new endpoint) -- this
+                         panel used to end at the 4 stat cards above,
+                         leaving the ticket's own taller right column
+                         towering over a mostly-empty left one. A visual
+                         read of exactly where the spread sits relative to
+                         entry/stop, not decoration: it's the same real
+                         zscore/config values the stat cards already show,
+                         just as a shape instead of only numbers. -->
+                    <div style=${{ marginTop: "18px" }}>
+                      <div class="panel-title" style=${{ marginBottom: "8px" }}>Spread Position (z-gauge)</div>
+                      <${BellCurve} zScore=${pairData.zscore ?? null}
+                        entryZ=${pairData.zscore !== null && pairData.zscore < 0 ? -pairData.config.entry_z : pairData.config.entry_z}
+                        stopZ=${pairData.zscore !== null && pairData.zscore < 0 ? -pairData.config.stop_z : pairData.config.stop_z}
+                        height=${160} />
                     </div>
                   `}
               </div>
