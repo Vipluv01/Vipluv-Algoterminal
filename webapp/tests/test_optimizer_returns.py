@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.accounting import compute_realizations
 from app.db import Base
 from app.models.trading import Mode, Order, OrderStatus, OrderType, Side
 from app.optimizer_returns import MIN_TRADING_DAYS, build_daily_return_series
@@ -33,6 +34,15 @@ def _order(user_id, symbol, side, qty, px, strategy_key, day, filled_qty=None):
     )
 
 
+def _realizations(orders, starting_cash=None):
+    # build_daily_return_series now takes realizations directly (see its
+    # own docstring: GET /optimizer feeds it get_cached_realizations'
+    # output rather than re-walking orders itself) -- this helper keeps
+    # every test below building orders exactly as before and just adds
+    # the one extra walk step a real caller already did upstream.
+    return compute_realizations(orders) if starting_cash is None else compute_realizations(orders, starting_cash)
+
+
 def test_returns_none_with_no_orders(db):
     assert build_daily_return_series([], ["a", "b"]) is None
 
@@ -42,7 +52,7 @@ def test_returns_none_with_only_one_active_strategy(db):
         _order(1, "X", Side.buy, 10, 100.0, "a", _day(1)),
         _order(1, "X", Side.sell, 10, 110.0, "a", _day(2)),
     ]
-    assert build_daily_return_series(orders, ["a", "b"]) is None
+    assert build_daily_return_series(_realizations(orders), ["a", "b"]) is None
 
 
 def test_returns_none_with_fewer_than_min_trading_days(db):
@@ -53,7 +63,7 @@ def test_returns_none_with_fewer_than_min_trading_days(db):
         _order(1, "Y", Side.buy, 10, 200.0, "b", _day(1)),
         _order(1, "Y", Side.sell, 10, 190.0, "b", _day(2)),
     ]
-    assert build_daily_return_series(orders, ["a", "b"]) is None
+    assert build_daily_return_series(_realizations(orders), ["a", "b"]) is None
 
 
 def test_builds_aligned_zero_filled_series_across_min_days(db):
@@ -70,7 +80,7 @@ def test_builds_aligned_zero_filled_series_across_min_days(db):
         orders.append(_order(1, "Y", Side.buy, 10, 200.0, "b", _day(d)))
         orders.append(_order(1, "Y", Side.sell, 10, 201.0, "b", _day(d)))  # realizes +10 each day
 
-    series = build_daily_return_series(orders, ["a", "b"], starting_cash=1000.0)
+    series = build_daily_return_series(_realizations(orders, 1000.0), ["a", "b"], starting_cash=1000.0)
     assert series is not None
     assert set(series.keys()) == {"a", "b"}
     assert len(series["a"]) == 5 == len(series["b"])
@@ -85,6 +95,7 @@ def test_ignores_realizations_for_strategy_keys_not_in_the_requested_list(db):
         _order(1, "Y", Side.buy, 10, 200.0, "not_requested", _day(1)),
         _order(1, "Y", Side.sell, 10, 190.0, "not_requested", _day(1)),
     ]
+    realizations = _realizations(orders)
     # Only "a" is in the requested list -- "not_requested" must not count toward the >=2-active-strategies floor.
-    assert build_daily_return_series(orders, ["a"]) is None
-    assert build_daily_return_series(orders, ["a", "not_requested"]) is None  # still <5 days
+    assert build_daily_return_series(realizations, ["a"]) is None
+    assert build_daily_return_series(realizations, ["a", "not_requested"]) is None  # still <5 days

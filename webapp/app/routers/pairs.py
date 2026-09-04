@@ -24,13 +24,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.accounting import compute_account
+from app.accounting import get_cached_account_snapshot
 from app.auth import get_current_user
 from app.broker.adapter_cache import IncompleteBrokerCredentialError, NoBrokerCredentialError, get_adapter_for_user
 from app.broker.angelone import AngelOneError
 from app.db import get_db
 from app.markets import DERIVED_INDICES, NAMED_INSTRUMENTS, MarketRegistry
-from app.models.trading import Mode, Order, OrderStatus
+from app.models.trading import Mode, Order
 from app.models.user import User
 from app.pairs_service import (
     PAIRS_STRATEGY,
@@ -90,13 +90,20 @@ def _pairs_orders(db: Session, user_id: int) -> list[Order]:
     )
 
 
-def _open_legs(orders: list[Order], current_prices: dict[str, float]) -> dict[str, LegOut]:
-    # Filtered to this strategy's own fills only -- a manual trade on
-    # ICICIBANK/HDFCBANK must not be mistaken for part of the pair position,
-    # the same "derive it, don't store a second copy" discipline
-    # app/accounting.py already documents.
-    filled = [o for o in orders if o.status in (OrderStatus.filled, OrderStatus.partially_filled)]
-    snapshot = compute_account(filled, current_prices, starting_cash=0.0)
+def _open_legs(db: Session, user_id: int, current_prices: dict[str, float]) -> dict[str, LegOut]:
+    # get_cached_account_snapshot(..., strategy_key=PAIRS_STRATEGY_KEY),
+    # not a fresh compute_account walk over _pairs_orders' own full fetch
+    # -- this endpoint (Pair Overview/Analytics) is polled every 5s, and
+    # confirmed live, 2026-09-04: re-walking this strategy's ENTIRE fill
+    # history from scratch on every poll was a real, ongoing cost. The
+    # cache's own status/mode filtering matches what this used to do by
+    # hand (filtered to filled/partially_filled fills only -- a manual
+    # trade on ICICIBANK/HDFCBANK must not be mistaken for part of the
+    # pair position, the same "derive it, don't store a second copy"
+    # discipline app/accounting.py already documents).
+    snapshot = get_cached_account_snapshot(
+        db, user_id, Mode.paper, current_prices, starting_cash=0.0, strategy_key=PAIRS_STRATEGY_KEY,
+    )
     return {
         sym: LegOut(symbol=sym, qty=p.qty, avg_entry_px=p.avg_entry_px, unrealized_pnl=p.unrealized_pnl)
         for sym, p in snapshot.positions.items()
@@ -348,7 +355,7 @@ def get_overview(
             coint_pvalue_max=PAIRS_STRATEGY.coint_pvalue_max, zscore_window=PAIRS_STRATEGY.zscore_window,
             min_history=PAIRS_STRATEGY.min_history, qty=PAIRS_STRATEGY.qty,
         ),
-        "legs": _open_legs(orders, current_prices),
+        "legs": _open_legs(db, user.id, current_prices),
         "entry_zscore": _current_entry_zscore(orders, position),
         "activity": [ActivityOut.model_validate(o) for o in orders[:20]],
     }
@@ -388,7 +395,7 @@ def get_analytics(
         "is_cointegrated": stats.is_cointegrated if stats else None,
         "hedge_ratio": stats.hedge_ratio if stats else None,
         "position": position,
-        "legs": _open_legs(orders, current_prices),
+        "legs": _open_legs(db, user.id, current_prices),
         "entry_zscore": _current_entry_zscore(orders, position),
     }
 
@@ -403,13 +410,12 @@ def force_close(
     legs, sized to whatever is actually held (not recomputed from the
     current hedge ratio -- closing must match what's really open, not a
     fresh beta that may have drifted since entry)."""
-    orders = _pairs_orders(db, user.id)
     position = current_pair_position(db, user.id)
     if position == "none":
         raise HTTPException(status_code=400, detail="no open pair position to close")
 
     current_prices = registry.current_prices()
-    legs = _open_legs(orders, current_prices)
+    legs = _open_legs(db, user.id, current_prices)
 
     for leg in legs.values():
         if leg.qty == 0:

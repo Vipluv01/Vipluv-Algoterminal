@@ -11,9 +11,10 @@ import math
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
+from app.accounting import get_cached_realizations
 from app.auth import get_current_user
 from app.db import get_db
-from app.models.trading import Mode, Order
+from app.models.trading import Mode
 from app.models.user import User
 from app.optimizer_returns import MIN_TRADING_DAYS, build_daily_return_series
 from app.portfolio_optimizer import max_sharpe_allocation
@@ -37,13 +38,13 @@ def _finite_or_none(x: float) -> float | None:
 
 @router.get("")
 def get_optimizer(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    orders = (
-        db.query(Order)
-        .filter(Order.user_id == user.id, Order.mode == Mode.paper)
-        .order_by(Order.created_at)
-        .all()
-    )
-    returns = build_daily_return_series(orders, STRATEGY_KEYS)
+    # get_cached_realizations, not a fresh db.query(Order)...all() + a
+    # full compute_realizations walk -- this endpoint re-walked a user's
+    # ENTIRE paper order history from scratch on every call, confirmed
+    # live at ~2.8s against the real account. Same incremental cache GET
+    # /dashboard/stats already uses.
+    realizations = get_cached_realizations(db, user.id, Mode.paper)
+    returns = build_daily_return_series(realizations, STRATEGY_KEYS)
     if returns is None:
         return {
             "insufficient_history": True,
