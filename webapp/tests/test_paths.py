@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from app.backtest.paths import clear_path_cache, generate_market_paths, get_market_paths
+from app.markets import NAMED_INSTRUMENTS
 
 
 @pytest.fixture(autouse=True)
@@ -14,9 +15,13 @@ def _clear_cache():
     clear_path_cache()
 
 
-def test_generates_all_seven_nse_symbols():
+def test_generates_every_named_nse_symbol():
+    # Tracks NAMED_INSTRUMENTS directly, not a hardcoded set -- a literal
+    # 7-symbol set here already went stale once (the 2026-09-04 expansion
+    # to 22), the same class of fix applied to test_portfolio_api.py and
+    # test_paths.py's own sibling tests.
     history = generate_market_paths(steps=20, seed=1)
-    assert set(history.symbols) == {"ICICIBANK", "HDFCBANK", "RELIANCE", "TCS", "INFY", "SBIN", "TATAMOTORS"}
+    assert set(history.symbols) == set(NAMED_INSTRUMENTS)
 
 
 def test_every_symbol_path_has_exactly_steps_bars():
