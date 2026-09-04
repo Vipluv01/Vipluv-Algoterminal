@@ -8,8 +8,8 @@ tag orders are stamped with and the starting-capital figure
 (accounting.STARTING_VIRTUAL_CASH_DEFAULT, Rs 1 crore) this router's views
 are computed against. This router is therefore a thin, mode-filtered
 sibling of routers/account.py, not a second accounting implementation --
-same compute_account/compute_equity_curve, same historical_price_lookup,
-just Mode.virtual instead of Mode.paper.
+same get_cached_account_snapshot/compute_equity_curve, same
+historical_price_lookup, just Mode.virtual instead of Mode.paper.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.accounting import STARTING_VIRTUAL_CASH_DEFAULT, compute_account, compute_equity_curve
+from app.accounting import STARTING_VIRTUAL_CASH_DEFAULT, compute_equity_curve, get_cached_account_snapshot
 from app.auth import get_current_user
 from app.db import get_db
 from app.market_price_lookup import historical_price_lookup
@@ -53,12 +53,17 @@ def get_virtual_account(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    orders = db.query(Order).filter(Order.user_id == user.id, Order.mode == Mode.virtual).all()
     # No option-mark merge here (unlike GET /account) -- option orders are
     # never tagged Mode.virtual (app/options/execution.py only ever
     # submits Mode.paper or Mode.live), so there is nothing for
     # mark_option_positions to find for this mode.
-    snapshot = compute_account(orders, registry.current_prices(), starting_cash=STARTING_VIRTUAL_CASH_DEFAULT)
+    #
+    # get_cached_account_snapshot, not a fresh full-history fetch+walk --
+    # same latency fix as GET /account (2026-09-04), for the same reason:
+    # this is polled repeatedly by AccountPanel.js in virtual mode too.
+    snapshot = get_cached_account_snapshot(
+        db, user.id, Mode.virtual, registry.current_prices(), starting_cash=STARTING_VIRTUAL_CASH_DEFAULT,
+    )
     return AccountOut(
         cash=snapshot.cash,
         total_value=snapshot.total_value,

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.accounting import compute_account, compute_equity_curve
+from app.accounting import compute_equity_curve, get_cached_account_snapshot
 from app.auth import get_current_user
 from app.db import get_db
 from app.market_price_lookup import historical_price_lookup
@@ -43,7 +43,6 @@ def get_account(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    orders = db.query(Order).filter(Order.user_id == user.id, Order.mode == Mode.paper).all()
     # only_primary=True: once sub-accounts exist, their cloned orders
     # (Order.sub_account_id set -- see pairs_service.submit_paper_order)
     # would otherwise mix into the PRIMARY account's own cash/positions
@@ -51,14 +50,21 @@ def get_account(
     # GET /account/sub/{id} is the view for a specific sub-account's own
     # numbers; this endpoint is the primary book alone.
     #
-    # Option contract marks are merged in BEFORE compute_account runs --
-    # without this, compute_account's current_prices.get(symbol, avg_entry_px)
-    # fallback would silently report every open option position as flat
-    # P&L, since an option contract key is never a key registry.
-    # current_prices() already knows about on its own (see
+    # Option contract marks are merged in BEFORE the walk runs -- without
+    # this, the walk's current_prices.get(symbol, avg_entry_px) fallback
+    # would silently report every open option position as flat P&L, since
+    # an option contract key is never one registry.current_prices()
+    # already knows about on its own (see
     # app/options/execution.py's mark_option_positions docstring).
+    #
+    # get_cached_account_snapshot, not a fresh db.query(Order)... + a full
+    # compute_account walk -- this endpoint is polled every few seconds by
+    # AccountPanel.js, and a real paper account had grown to 107,651
+    # orders by 2026-09-04, making the full re-walk the dominant cost on
+    # every single poll (see that function's own docstring for the
+    # measured numbers).
     prices = {**registry.current_prices(), **mark_option_positions(db, user.id, registry)}
-    snapshot = compute_account(orders, prices, only_primary=True)
+    snapshot = get_cached_account_snapshot(db, user.id, Mode.paper, prices, only_primary=True)
     return AccountOut(
         cash=snapshot.cash,
         total_value=snapshot.total_value,
@@ -161,9 +167,8 @@ def get_sub_account(
     if sub is None or sub.user_id != user.id:
         raise HTTPException(status_code=404, detail="sub-account not found")
 
-    orders = db.query(Order).filter(Order.user_id == user.id, Order.mode == Mode.paper).all()
     prices = {**registry.current_prices(), **mark_option_positions(db, user.id, registry)}
-    snapshot = compute_account(orders, prices, sub_account_id=sub_account_id)
+    snapshot = get_cached_account_snapshot(db, user.id, Mode.paper, prices, sub_account_id=sub_account_id)
     return AccountOut(
         cash=snapshot.cash,
         total_value=snapshot.total_value,
