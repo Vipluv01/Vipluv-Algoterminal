@@ -18,12 +18,16 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.accounting import STARTING_VIRTUAL_CASH_DEFAULT, compute_equity_curve, get_cached_account_snapshot
+from app.accounting import (
+    STARTING_VIRTUAL_CASH_DEFAULT,
+    get_cached_account_snapshot,
+    get_cached_equity_curve,
+)
 from app.auth import get_current_user
 from app.db import get_db
 from app.market_price_lookup import historical_price_lookup
 from app.markets import MarketRegistry
-from app.models.trading import Mode, Order
+from app.models.trading import Mode
 from app.models.user import User
 from app.routers.orders import get_registry
 
@@ -91,7 +95,13 @@ def get_virtual_equity_curve(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    orders = db.query(Order).filter(Order.user_id == user.id, Order.mode == Mode.virtual).all()
-    return compute_equity_curve(
-        orders, price_lookup=historical_price_lookup(registry), starting_cash=STARTING_VIRTUAL_CASH_DEFAULT,
+    # get_cached_equity_curve, not a fresh full-history fetch+walk -- same
+    # latency fix as GET /account/equity-curve (2026-09-04). Order.sub_
+    # account_id is exclusively a Mode.paper concept (see
+    # pairs_service.submit_paper_order/app/routers/account.py's own
+    # sub-account endpoints) -- a virtual order never has one set, so the
+    # cache's own sub_account_id.is_(None) filter is a no-op here, not a
+    # behavior change from the unfiltered query this replaces.
+    return get_cached_equity_curve(
+        db, user.id, Mode.virtual, historical_price_lookup(registry), starting_cash=STARTING_VIRTUAL_CASH_DEFAULT,
     )

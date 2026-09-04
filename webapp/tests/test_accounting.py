@@ -10,6 +10,7 @@ from app.accounting import (
     STARTING_VIRTUAL_CASH_DEFAULT,
     _account_cache,
     _realizations_cache,
+    _WalkState,
     compute_account,
     compute_equity_curve,
     compute_realized_pnl_curve,
@@ -524,6 +525,46 @@ def test_cached_snapshot_rebuilds_when_its_watermark_order_no_longer_exists(db, 
     rebuilt = get_cached_account_snapshot(db, user.id, Mode.paper, {"RELIANCE": 2900.0, "TCS": 4000.0})
     assert rebuilt.positions["RELIANCE"].qty == 10, "a stale watermark must trigger a full rebuild, not silently drop the real RELIANCE position"
     assert rebuilt.positions["TCS"].qty == -3, "and must still pick up the order that arrived after the stale watermark was forged"
+
+
+def test_cached_snapshot_rebuilds_when_the_watermark_id_belongs_to_a_different_mode(db, user):
+    """A stricter version of the test above, for a real bug the FIRST
+    version of this staleness check had: it only confirmed 'an order with
+    this id exists SOMEWHERE', not that it belongs to the same (user_id,
+    mode) this cache key is for. That weak check is satisfied by
+    coincidence whenever the stale watermark id numerically matches a
+    REAL order that just happens to be for a different mode -- exactly
+    what happens across two consecutive tests sharing one in-memory
+    SQLite DB, where ids restart small each time. Confirmed live: this
+    exact scenario let a virtual-mode order's data leak into a paper-mode
+    read in test_portfolio_api.py's own realized-pnl-curve test before
+    the check was scoped through the same user_id/mode filter the main
+    query already uses."""
+    virtual_order = _db_order(user.id, "RELIANCE", Side.buy, 10, 2900.0, mode=Mode.virtual)
+    db.add(virtual_order)
+    db.commit()
+
+    # Forge a PAPER-mode cache entry as if a REAL earlier paper position
+    # existed (a RELIANCE long), with its watermark pointing at the
+    # VIRTUAL order's real id -- that id genuinely exists in this DB,
+    # just not for paper. Baking in an actual position (not just a bare
+    # watermark) is what makes this test able to tell the two behaviors
+    # apart: an unscoped staleness check would wrongly treat this as
+    # still valid and let the forged RELIANCE position leak straight into
+    # the snapshot; a properly scoped one discards it and rebuilds clean.
+    key = (user.id, Mode.paper, None, False)
+    _account_cache[key] = _WalkState(
+        cash=100_000.0 - 10 * 2900.0, qty={"RELIANCE": 10}, avg_px={"RELIANCE": 2900.0},
+        last_order_id=virtual_order.id,
+    )
+
+    paper_order = _db_order(user.id, "TCS", Side.buy, 4, 4000.0, mode=Mode.paper, minutes_after_t0=1)
+    db.add(paper_order)
+    db.commit()
+
+    snap = get_cached_account_snapshot(db, user.id, Mode.paper, {"TCS": 4000.0})
+    assert "RELIANCE" not in snap.positions, "the virtual-mode order must never leak into a paper-mode snapshot"
+    assert snap.positions["TCS"].qty == 4, "the real paper order must still be picked up after the stale cross-mode watermark is discarded"
 
 
 # ---------------------------------------------------------------------------
