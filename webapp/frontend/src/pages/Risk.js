@@ -43,6 +43,15 @@ export function Risk() {
   const [risk, setRisk] = React.useState(null);
   const [edits, setEdits] = React.useState({}); // key -> string (raw input value)
   const [saving, setSaving] = React.useState(false);
+  // Real bug fixed 2026-09-04: "Clear Halt" used to fire immediately on
+  // click, no confirmation at all -- a single misclick silently dropped
+  // every restriction the circuit breaker had just imposed (the daily
+  // drawdown limit that TRIPPED the halt in the first place). This is a
+  // two-step affordance instead of a browser confirm() dialog, matching
+  // this app's own styled-UI convention rather than a native popup that
+  // would look out of place here.
+  const [confirmingClearHalt, setConfirmingClearHalt] = React.useState(false);
+  const [clearingHalt, setClearingHalt] = React.useState(false);
   const toast = useToast();
 
   const load = React.useCallback(() => {
@@ -81,13 +90,17 @@ export function Risk() {
   }
 
   async function resetHalt() {
+    setClearingHalt(true);
     try {
       const updated = await api.risk.resetHalt();
       setRisk(updated);
+      setConfirmingClearHalt(false);
       await refreshRiskStatus();
-      toast("Trading halt cleared", "ok");
+      toast("Trading halt cleared — every restriction it imposed is lifted", "ok");
     } catch (e) {
       toast(e.message || "Could not clear the halt", "err");
+    } finally {
+      setClearingHalt(false);
     }
   }
 
@@ -105,7 +118,18 @@ export function Risk() {
             <span class=${`badge ${risk.trading_halted ? "badge-off" : "badge-live"}`}>
               ${risk.trading_halted ? "● CIRCUIT BREAKER: HALTED" : "● CIRCUIT BREAKER: ARMED"}
             </span>
-            ${risk.trading_halted && html`<button class="btn btn-sm" onClick=${resetHalt}>Clear Halt</button>`}
+            ${risk.trading_halted && !confirmingClearHalt && html`
+              <button class="btn btn-sm" onClick=${() => setConfirmingClearHalt(true)}>Clear Halt</button>
+            `}
+            ${risk.trading_halted && confirmingClearHalt && html`
+              <${React.Fragment}>
+                <span style=${{ fontSize: "11.5px", color: "var(--text-dim)" }}>Clear every restriction this halt imposed?</span>
+                <button class="btn btn-sm btn-sell" disabled=${clearingHalt} onClick=${resetHalt}>
+                  ${clearingHalt ? "Clearing…" : "Confirm Clear"}
+                </button>
+                <button class="btn btn-sm btn-ghost" disabled=${clearingHalt} onClick=${() => setConfirmingClearHalt(false)}>Cancel</button>
+              <//>
+            `}
           </div>
         `}
       </div>

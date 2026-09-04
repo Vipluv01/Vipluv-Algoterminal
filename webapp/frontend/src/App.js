@@ -74,6 +74,13 @@ export function App() {
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
   const halted = useTradingHalted();
   const [resettingHalt, setResettingHalt] = React.useState(false);
+  // Real bug fixed 2026-09-04: this banner's own "Clear Halt" fired
+  // immediately on click, no confirmation -- the same missing step just
+  // fixed on the Risk settings page's own copy of this button (see
+  // Risk.js), just here it's the one a user actually sees FIRST (this
+  // banner shows on every page, the moment an order gets rejected for
+  // being halted -- Risk.js's own button is a step further away).
+  const [confirmingClearHalt, setConfirmingClearHalt] = React.useState(false);
   const toast = useToast();
 
   async function resetHalt() {
@@ -81,7 +88,8 @@ export function App() {
     try {
       await api.risk.resetHalt();
       await refreshRiskStatus();
-      toast("Trading halt cleared", "ok");
+      setConfirmingClearHalt(false);
+      toast("Trading halt cleared — every restriction it imposed is lifted", "ok");
     } catch (e) {
       toast(e.message || "Could not clear the halt", "err");
     } finally {
@@ -141,9 +149,17 @@ export function App() {
       ${halted && html`
         <div class="halt-banner">
           <span>⛔ TRADING HALTED — the circuit breaker has stopped all new orders</span>
-          <button class="btn btn-sm" disabled=${resettingHalt} onClick=${resetHalt}>
-            ${resettingHalt ? "Clearing…" : "Clear Halt"}
-          </button>
+          ${!confirmingClearHalt
+            ? html`<button class="btn btn-sm" onClick=${() => setConfirmingClearHalt(true)}>Clear Halt</button>`
+            : html`
+              <${React.Fragment}>
+                <span style=${{ fontSize: "11.5px" }}>Clear every restriction this halt imposed?</span>
+                <button class="btn btn-sm btn-sell" disabled=${resettingHalt} onClick=${resetHalt}>
+                  ${resettingHalt ? "Clearing…" : "Confirm Clear"}
+                </button>
+                <button class="btn btn-sm btn-ghost" disabled=${resettingHalt} onClick=${() => setConfirmingClearHalt(false)}>Cancel</button>
+              <//>
+            `}
         </div>
       `}
       ${!isLanding && html`
