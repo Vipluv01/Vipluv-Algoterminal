@@ -81,11 +81,25 @@ class ActivityOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-def _pairs_orders(db: Session, user_id: int) -> list[Order]:
+ACTIVITY_FEED_LIMIT = 20
+
+
+def _recent_pairs_activity(db: Session, user_id: int, limit: int = ACTIVITY_FEED_LIMIT) -> list[Order]:
+    """The activity feed only ever showed the most recent
+    ACTIVITY_FEED_LIMIT orders anyway (orders[:20] at the two call
+    sites below) -- this used to fetch and ORM-materialize this
+    strategy's ENTIRE fill history (24,066+ orders on the real account)
+    just to slice off the first 20 in Python. Confirmed live, 2026-09-04:
+    GET /pairs/overview measured ~1.7s, the dominant remaining cost after
+    _open_legs' own walk was already cached in a previous pass. A real
+    LIMIT in the query is the actual fix -- the ORDER BY is already
+    indexed (created_at), so this is now a bounded, cheap query
+    regardless of how long this strategy has been trading."""
     return (
         db.query(Order)
         .filter(Order.user_id == user_id, Order.strategy_key == PAIRS_STRATEGY_KEY, Order.mode == Mode.paper)
         .order_by(Order.created_at.desc())
+        .limit(limit)
         .all()
     )
 
@@ -153,18 +167,28 @@ def _telemetry_out() -> dict | None:
     }
 
 
-def _current_entry_zscore(orders: list[Order], position: str) -> float | None:
+def _current_entry_zscore(db: Session, user_id: int, position: str) -> float | None:
     if position == "none":
         return None
-    # orders is already sorted created_at desc -- the most recent
-    # entry_zscore-tagged fill on the A leg is the entry that opened
-    # whatever position is currently open, since the strategy's own state
-    # machine (pairs_cointegration.py) never re-enters while already
-    # holding a position.
-    for o in orders:
-        if o.symbol == PAIRS_SYMBOL_A and o.entry_zscore is not None:
-            return o.entry_zscore
-    return None
+    # The most recent entry_zscore-tagged fill on the A leg is the entry
+    # that opened whatever position is currently open, since the
+    # strategy's own state machine (pairs_cointegration.py) never
+    # re-enters while already holding a position. A direct, targeted
+    # query (not a scan over _recent_pairs_activity's own bounded list)
+    # -- that list is capped at ACTIVITY_FEED_LIMIT for the activity feed's
+    # own display purposes, but the real entry fill for a long-held
+    # position can easily sit further back than that, so reusing it here
+    # would silently return None (or the wrong entry) for exactly the
+    # positions that have been open longest. This is one indexed row, not
+    # a size-dependent cost either way.
+    order = (
+        db.query(Order)
+        .filter(Order.user_id == user_id, Order.strategy_key == PAIRS_STRATEGY_KEY, Order.mode == Mode.paper,
+                Order.symbol == PAIRS_SYMBOL_A, Order.entry_zscore.isnot(None))
+        .order_by(Order.created_at.desc())
+        .first()
+    )
+    return order.entry_zscore if order is not None else None
 
 
 class PairTestOut(BaseModel):
@@ -334,7 +358,6 @@ def get_overview(
         min_history=PAIRS_STRATEGY.min_history, series_length=1,
     )
 
-    orders = _pairs_orders(db, user.id)
     position = current_pair_position(db, user.id)
     current_prices = registry.current_prices()
 
@@ -356,8 +379,8 @@ def get_overview(
             min_history=PAIRS_STRATEGY.min_history, qty=PAIRS_STRATEGY.qty,
         ),
         "legs": _open_legs(db, user.id, current_prices),
-        "entry_zscore": _current_entry_zscore(orders, position),
-        "activity": [ActivityOut.model_validate(o) for o in orders[:20]],
+        "entry_zscore": _current_entry_zscore(db, user.id, position),
+        "activity": [ActivityOut.model_validate(o) for o in _recent_pairs_activity(db, user.id)],
     }
 
 
@@ -375,7 +398,6 @@ def get_analytics(
         min_history=PAIRS_STRATEGY.min_history, series_length=300,
     )
 
-    orders = _pairs_orders(db, user.id)
     position = current_pair_position(db, user.id)
     current_prices = registry.current_prices()
 
@@ -396,7 +418,7 @@ def get_analytics(
         "hedge_ratio": stats.hedge_ratio if stats else None,
         "position": position,
         "legs": _open_legs(db, user.id, current_prices),
-        "entry_zscore": _current_entry_zscore(orders, position),
+        "entry_zscore": _current_entry_zscore(db, user.id, position),
     }
 
 

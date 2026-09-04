@@ -13,6 +13,7 @@ exactly as in test_brackets_api.py.
 """
 
 import numpy as np
+import pytest
 
 from app.main import app
 from app.pairs_service import refresh_pair_telemetry_once
@@ -100,6 +101,57 @@ def test_analytics_serializes_cleanly_for_a_non_cointegrated_pair(client):
     resp = client.get("/pairs/analytics")
     assert resp.status_code == 200
     assert resp.json()["is_cointegrated"] in (True, False)
+
+
+def test_entry_zscore_survives_more_than_the_activity_feed_limit_of_newer_orders(client):
+    """Regression test for a real bug this fix could have introduced,
+    2026-09-04: GET /pairs/overview's activity feed used to fetch this
+    strategy's ENTIRE fill history just to slice off the most recent 20
+    in Python (confirmed live: ~1.7s against the real 24,066-order
+    account) -- fixed with a real LIMIT in the query. entry_zscore's own
+    lookup must NOT have been narrowed to that same bounded list: a
+    position held through more than ACTIVITY_FEED_LIMIT subsequent fills
+    (entirely plausible for a strategy that's been trading a long time)
+    would otherwise silently lose its own entry_zscore the moment enough
+    newer orders piled up after it. Seeds a real entry_zscore-tagged fill,
+    then enough newer plain fills to push it well past the activity
+    feed's own limit, and confirms it's still found."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.models.trading import Mode, Order, OrderStatus, OrderType, Side
+    from app.pairs_service import PAIRS_STRATEGY_KEY, PAIRS_SYMBOL_A, PAIRS_SYMBOL_B
+
+    client.get("/pairs/overview")  # ensures the dev user row exists
+
+    db = client.db_session_factory()
+    try:
+        from app.models.user import User
+        user = db.query(User).first()
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        db.add(Order(
+            user_id=user.id, mode=Mode.paper, strategy_key=PAIRS_STRATEGY_KEY, symbol=PAIRS_SYMBOL_A,
+            side=Side.buy, order_type=OrderType.market, qty=10, status=OrderStatus.filled, filled_qty=10,
+            avg_fill_px=1250.0, entry_zscore=-2.345, created_at=base,
+        ))
+        # More orders than ACTIVITY_FEED_LIMIT, all AFTER the entry fill --
+        # the activity feed's own bounded query would only ever see these.
+        for i in range(1, 30):
+            db.add(Order(
+                user_id=user.id, mode=Mode.paper, strategy_key=PAIRS_STRATEGY_KEY, symbol=PAIRS_SYMBOL_B,
+                side=Side.buy, order_type=OrderType.market, qty=1, status=OrderStatus.filled, filled_qty=1,
+                avg_fill_px=1650.0, created_at=base + timedelta(minutes=i),
+            ))
+        db.commit()
+    finally:
+        db.close()
+
+    overview = client.get("/pairs/overview").json()
+    assert overview["position"] == "long_spread"
+    assert overview["entry_zscore"] == pytest.approx(-2.345)
+
+    analytics = client.get("/pairs/analytics").json()
+    assert analytics["entry_zscore"] == pytest.approx(-2.345)
 
 
 def test_force_close_is_rejected_with_no_open_position(client):
