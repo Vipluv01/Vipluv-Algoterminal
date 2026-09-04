@@ -6,11 +6,11 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.accounting import compute_realizations
+from app.accounting import get_cached_realizations
 from app.auth import get_current_user
 from app.dashboard_stats import compute_day_stats, compute_day_win_rate, compute_trade_stats
 from app.db import get_db
-from app.models.trading import Mode, Order
+from app.models.trading import Mode
 from app.models.user import User
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -28,8 +28,7 @@ class TradeStatsOut(BaseModel):
 
 @router.get("/stats", response_model=TradeStatsOut)
 def get_stats(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    orders = db.query(Order).filter(Order.user_id == user.id, Order.mode == Mode.paper).all()
-    realizations = compute_realizations(orders)
+    realizations = get_cached_realizations(db, user.id, Mode.paper)
     trade_stats = compute_trade_stats(realizations)
     day_win_rate = compute_day_win_rate(compute_day_stats(realizations))
     return TradeStatsOut(
@@ -47,8 +46,7 @@ class DayOut(BaseModel):
 
 @router.get("/calendar", response_model=list[DayOut])
 def get_calendar(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    orders = db.query(Order).filter(Order.user_id == user.id, Order.mode == Mode.paper).all()
-    realizations = compute_realizations(orders)
+    realizations = get_cached_realizations(db, user.id, Mode.paper)
     return [DayOut(day=d.day, pnl=d.pnl, n_trades=d.n_trades) for d in compute_day_stats(realizations)]
 
 

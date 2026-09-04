@@ -9,11 +9,13 @@ from app.accounting import (
     STARTING_PAPER_CASH_DEFAULT,
     STARTING_VIRTUAL_CASH_DEFAULT,
     _account_cache,
+    _realizations_cache,
     compute_account,
     compute_equity_curve,
     compute_realized_pnl_curve,
     compute_realizations,
     get_cached_account_snapshot,
+    get_cached_realizations,
 )
 from app.db import Base
 from app.models.trading import Mode, Order, OrderStatus, OrderType, Side
@@ -368,10 +370,13 @@ def _clear_account_cache():
     likely to reuse id=1 -- without clearing this between tests, a later
     test could read an earlier test's cached state for the same
     (user_id, mode, sub_account_id, only_primary) key and silently pass
-    for the wrong reason."""
+    for the wrong reason. _realizations_cache is the same kind of cache
+    (see get_cached_realizations) and needs the same treatment."""
     _account_cache.clear()
+    _realizations_cache.clear()
     yield
     _account_cache.clear()
+    _realizations_cache.clear()
 
 
 def _db_order(user_id, symbol, side, filled_qty, avg_fill_px, minutes_after_t0=0, mode=Mode.paper, sub_account_id=None):
@@ -519,3 +524,82 @@ def test_cached_snapshot_rebuilds_when_its_watermark_order_no_longer_exists(db, 
     rebuilt = get_cached_account_snapshot(db, user.id, Mode.paper, {"RELIANCE": 2900.0, "TCS": 4000.0})
     assert rebuilt.positions["RELIANCE"].qty == 10, "a stale watermark must trigger a full rebuild, not silently drop the real RELIANCE position"
     assert rebuilt.positions["TCS"].qty == -3, "and must still pick up the order that arrived after the stale watermark was forged"
+
+
+# ---------------------------------------------------------------------------
+# get_cached_realizations: the same incremental fix, for GET /dashboard/
+# stats and GET /dashboard/calendar (2026-09-04) -- these two need the
+# FULL list of realized close/reduce/flip events, not just a terminal
+# snapshot, so this is a second, separate cache from _account_cache
+# (see get_cached_realizations' own docstring for why it isn't folded in).
+# ---------------------------------------------------------------------------
+
+def test_cached_realizations_match_a_full_walk_across_incremental_batches(db, user):
+    """Same discipline as the account-snapshot consistency test above:
+    drive the cache across three batches of inserted orders and confirm
+    the final cached realizations list matches compute_realizations on
+    the full order history fetched fresh -- covering wins, losses, a
+    re-add that must NOT realize anything, and a flip-through-flat."""
+    batch1 = [
+        _db_order(user.id, "TCS", Side.buy, 10, 4000.0, minutes_after_t0=0),   # opens -- no realization
+        _db_order(user.id, "TCS", Side.sell, 4, 4300.0, minutes_after_t0=1),   # win
+    ]
+    db.add_all(batch1)
+    db.commit()
+    r1 = get_cached_realizations(db, user.id, Mode.paper)
+    assert len(r1) == 1
+    assert r1[0].amount == pytest.approx(4 * (4300.0 - 4000.0))
+
+    batch2 = [
+        _db_order(user.id, "TCS", Side.buy, 4, 4000.0, minutes_after_t0=2),    # re-adds -- no realization
+        _db_order(user.id, "TCS", Side.sell, 4, 3900.0, minutes_after_t0=3),   # loss
+        _db_order(user.id, "SBIN", Side.buy, 10, 800.0, minutes_after_t0=4),
+        _db_order(user.id, "SBIN", Side.sell, 15, 820.0, minutes_after_t0=5),  # flip-through-flat
+    ]
+    db.add_all(batch2)
+    db.commit()
+    r2 = get_cached_realizations(db, user.id, Mode.paper)
+    assert len(r2) == 3
+
+    all_orders = db.query(Order).filter(Order.user_id == user.id, Order.mode == Mode.paper).all()
+    expected = compute_realizations(all_orders)
+    assert len(r2) == len(expected)
+    assert sum(r.amount for r in r2) == pytest.approx(sum(e.amount for e in expected))
+    assert {r.symbol for r in r2} == {e.symbol for e in expected}
+
+    # dashboard_stats.compute_trade_stats/compute_day_stats only sum,
+    # count, and day-bucket -- never assume insertion order -- so this is
+    # the property that actually matters to the real consumers.
+    from app.dashboard_stats import compute_day_stats, compute_trade_stats
+    assert compute_trade_stats(r2) == compute_trade_stats(expected)
+    assert compute_day_stats(r2) == compute_day_stats(expected)
+
+
+def test_cached_realizations_is_idempotent_and_isolated_by_user_and_mode(db, user):
+    other_user = User(google_sub="s3", email="e3@x.com", display_name="T3")
+    db.add(other_user)
+    db.commit()
+    db.refresh(other_user)
+
+    orders = [
+        _db_order(user.id, "TCS", Side.buy, 10, 4000.0, mode=Mode.paper, minutes_after_t0=0),
+        _db_order(user.id, "TCS", Side.sell, 10, 4200.0, mode=Mode.paper, minutes_after_t0=1),
+        _db_order(user.id, "TCS", Side.buy, 5, 4000.0, mode=Mode.virtual, minutes_after_t0=2),
+        _db_order(user.id, "TCS", Side.sell, 5, 3900.0, mode=Mode.virtual, minutes_after_t0=3),
+        _db_order(other_user.id, "TCS", Side.buy, 1, 4000.0, mode=Mode.paper, minutes_after_t0=4),
+        _db_order(other_user.id, "TCS", Side.sell, 1, 5000.0, mode=Mode.paper, minutes_after_t0=5),
+    ]
+    db.add_all(orders)
+    db.commit()
+
+    user_paper = get_cached_realizations(db, user.id, Mode.paper)
+    user_virtual = get_cached_realizations(db, user.id, Mode.virtual)
+    other_paper = get_cached_realizations(db, other_user.id, Mode.paper)
+
+    assert len(user_paper) == 1 and user_paper[0].amount == pytest.approx(10 * (4200.0 - 4000.0))
+    assert len(user_virtual) == 1 and user_virtual[0].amount == pytest.approx(5 * (3900.0 - 4000.0))
+    assert len(other_paper) == 1 and other_paper[0].amount == pytest.approx(1 * (5000.0 - 4000.0))
+
+    # A repeat call with nothing new must return the same list, not
+    # double-append the same realizations.
+    assert get_cached_realizations(db, user.id, Mode.paper) == user_paper

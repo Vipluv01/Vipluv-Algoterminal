@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.accounting import compute_account, compute_realized_pnl_curve
+from app.accounting import compute_realized_pnl_curve, get_cached_account_snapshot
 from app.auth import get_current_user
 from app.db import get_db
 from app.markets import MarketRegistry
@@ -76,8 +76,7 @@ def _portfolio_weights_and_returns(
     db: Session, user: User, registry: MarketRegistry, mode: Mode,
 ) -> tuple[dict[str, float], dict[str, float], float, str | None]:
     prices = {**registry.current_prices(), **mark_option_positions(db, user.id, registry)}
-    orders = db.query(Order).filter(Order.user_id == user.id, Order.mode == mode).all()
-    snapshot = compute_account(orders, prices, only_primary=True)
+    snapshot = get_cached_account_snapshot(db, user.id, mode, prices, only_primary=True)
 
     if snapshot.total_value <= 0:
         return {}, {}, snapshot.total_value, "account total_value is not positive -- nothing to attribute"
@@ -204,11 +203,10 @@ def get_sub_account_breakdown(
         return []
 
     prices = {**registry.current_prices(), **mark_option_positions(db, user.id, registry)}
-    orders = db.query(Order).filter(Order.user_id == user.id, Order.mode == Mode.paper).all()
 
     out = []
     for sub in subs:
-        snapshot = compute_account(orders, prices, sub_account_id=sub.id)
+        snapshot = get_cached_account_snapshot(db, user.id, Mode.paper, prices, sub_account_id=sub.id)
         out.append(SubAccountBreakdownOut(
             id=sub.id, label=sub.label, sizing_multiplier=sub.sizing_multiplier, is_active=sub.is_active,
             cash=snapshot.cash, total_value=snapshot.total_value,
