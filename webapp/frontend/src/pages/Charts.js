@@ -3,6 +3,8 @@ import { html } from "../html.js";
 import { api, subscribeMarketForMode } from "../api.js";
 import { fmtMoney } from "../format.js";
 import { CandleChart } from "../components/CandleChart.js";
+import { SymbolSearch } from "../components/SymbolSearch.js";
+import { useLiveEquityNames } from "../components/LiveSymbolSearch.js";
 import { useMode } from "../mode.js";
 
 const LAYOUT_KEY = "algoterminal:charts:layout";
@@ -44,9 +46,16 @@ function writeStored(key, value) {
   }
 }
 
-function ChartSlot({ pane, allSymbols, onChangeSymbol, onChangeInterval, onCrosshairMove, syncCrosshair }) {
+// searchNames: the FULL universe this pane's own search should offer --
+// live mode's real ~2000+ equities (fetched once, shared across every
+// pane by Charts() itself -- see its own comment on why this isn't
+// fetched per-pane) or paper/virtual's own (smaller, locally-known)
+// tradable universe. Each of up to 4 panes keeps its own independent
+// symbol choice (unchanged from the old per-pane <select>) -- only the
+// PICKER changed, from a bounded dropdown to a real search over
+// whatever this mode can actually chart.
+function ChartSlot({ pane, searchNames, mode, onChangeSymbol, onChangeInterval, onCrosshairMove, syncCrosshair }) {
   const [tick, setTick] = React.useState(null);
-  const mode = useMode();
   React.useEffect(() => {
     const unsub = subscribeMarketForMode(mode, pane.symbol, setTick);
     return unsub;
@@ -54,11 +63,13 @@ function ChartSlot({ pane, allSymbols, onChangeSymbol, onChangeInterval, onCross
 
   return html`
     <div class="panel panel-pad">
-      <div style=${{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
-        <select class="input" style=${{ width: "auto", fontWeight: 700 }} value=${pane.symbol} onChange=${(e) => onChangeSymbol(e.target.value)}>
-          ${allSymbols.map((s) => html`<option key=${s} value=${s}>${s}</option>`)}
-        </select>
-        ${tick?.price && html`<span class="mono" style=${{ fontWeight: 600 }}>${fmtMoney(tick.price)}</span>`}
+      <div style=${{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "10px", marginBottom: "8px" }}>
+        <div style=${{ flex: 1, minWidth: 0 }}>
+          <div class="mono" style=${{ fontWeight: 700, fontSize: "13px", marginBottom: "6px" }}>${pane.symbol}</div>
+          <${SymbolSearch} names=${searchNames} onSelect=${onChangeSymbol}
+                           placeholder=${searchNames ? `Search ${searchNames.length.toLocaleString()} stocks…` : "Loading…"} />
+        </div>
+        ${tick?.price && html`<span class="mono" style=${{ fontWeight: 600, whiteSpace: "nowrap" }}>${fmtMoney(tick.price)}</span>`}
       </div>
       <${CandleChart} symbol=${pane.symbol} price=${tick?.price}
                        initialIntervalKey=${pane.interval} onIntervalChange=${onChangeInterval}
@@ -75,6 +86,13 @@ const LAYOUTS = [
 
 export function Charts() {
   const [allSymbols, setAllSymbols] = React.useState([]);
+  const mode = useMode();
+  // Fetched once here, not once per pane -- up to 4 ChartSlot instances
+  // all need the same real ~2000+ equity list in live mode; each doing
+  // its own independent fetch (LiveSymbolSearch's default behavior) would
+  // be 4 redundant requests for identical data on every page load.
+  const liveNames = useLiveEquityNames();
+  const searchNames = mode === "live" ? liveNames : allSymbols;
   const [layout, setLayoutRaw] = React.useState(readStoredLayout);
   const [panes, setPanesRaw] = React.useState(readStoredPanes);
   // The last dataIndex any pane's crosshair moved to, broadcast to every
@@ -125,7 +143,7 @@ export function Charts() {
       </div>
       <div class=${gridClass} style=${layout === "1" ? { display: "block" } : undefined}>
         ${panes.slice(0, visibleCount).map((pane, i) => html`
-          <${ChartSlot} key=${i} pane=${pane} allSymbols=${allSymbols}
+          <${ChartSlot} key=${i} pane=${pane} searchNames=${searchNames} mode=${mode}
                         onChangeSymbol=${(sym) => setPane(i, { symbol: sym })}
                         onChangeInterval=${(interval) => setPane(i, { interval })}
                         onCrosshairMove=${setSharedCrosshair}

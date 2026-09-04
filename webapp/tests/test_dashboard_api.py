@@ -39,5 +39,32 @@ def test_calendar_starts_empty(client):
     assert resp.json() == []
 
 
+def test_stats_and_calendar_are_mode_aware(client):
+    """Regression test for a real bug (2026-09-04): both endpoints used
+    to ALWAYS compute Mode.paper regardless of the `mode` query param --
+    a user in virtual or live mode looking at a Dashboard covered only by
+    a 'this is always paper data' banner. A round trip placed in virtual
+    mode must show up under ?mode=virtual and NOT under the (default)
+    paper view, which must stay genuinely empty."""
+    buy = client.post("/orders", json={
+        "symbol": "ICICIBANK", "side": "buy", "order_type": "market", "qty": 5, "mode": "virtual",
+    }).json()
+    assert buy["filled_qty"] == 5
+    sell = client.post("/orders", json={
+        "symbol": "ICICIBANK", "side": "sell", "order_type": "market", "qty": 5, "mode": "virtual",
+    }).json()
+    assert sell["filled_qty"] == 5
+
+    paper_stats = client.get("/dashboard/stats").json()
+    assert paper_stats["n_trades"] == 0, "the virtual-mode round trip must not leak into the default (paper) view"
+
+    virtual_stats = client.get("/dashboard/stats", params={"mode": "virtual"}).json()
+    assert virtual_stats["n_trades"] == 1
+
+    virtual_calendar = client.get("/dashboard/calendar", params={"mode": "virtual"}).json()
+    assert len(virtual_calendar) == 1
+    assert virtual_calendar[0]["pnl"] == pytest.approx(virtual_stats["net_pnl"])
+
+
 # Journal notes (formerly /dashboard/notes) moved to their own screen and
 # their own test file -- see tests/test_journal_api.py.

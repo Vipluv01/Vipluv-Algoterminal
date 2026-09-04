@@ -42,7 +42,7 @@ export function TimeAndSales({ tick, symbol }) {
       <div class="panel-title">Time & Sales <span style=${{ fontWeight: 400, color: "var(--text-faint)", fontSize: "10px", textTransform: "none" }}>(price changes, not fills -- see below)</span></div>
       <div style=${{ overflowY: "auto", flex: 1, maxHeight: "360px" }}>
         ${rows.length === 0
-          ? html`<div style=${{ color: "var(--text-faint)", fontSize: "12px", padding: "16px 0", textAlign: "center" }}>No price changes yet</div>`
+          ? html`<div style=${{ color: "var(--text-faint)", fontSize: "12px", padding: "16px 0", textAlign: "center" }}>${tick == null ? "Loading…" : "No price changes yet"}</div>`
           : rows.map((r, i) => html`
               <div key=${r.timestamp} class="row hairline tape-row" style=${{ padding: "3px 4px", minHeight: "auto", gap: "8px" }}>
                 <span class=${`tape-tag ${r.direction === "up" ? "pos" : "neg"}`}>${r.direction === "up" ? "BUY" : "SELL"}</span>

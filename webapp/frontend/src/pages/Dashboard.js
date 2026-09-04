@@ -72,15 +72,26 @@ function NotesPanel() {
   `;
 }
 
+const MODE_LABEL = { paper: "paper mode", virtual: "virtual mode (₹1 Cr simulated capital)", live: "live mode — real Angel One trading" };
+
 export function Dashboard() {
   const [stats, setStats] = React.useState(null);
   const [calendar, setCalendar] = React.useState([]);
   const mode = useMode();
 
+  // Real bug fixed 2026-09-04: this used to ALWAYS fetch Mode.paper
+  // regardless of the selected mode, covered only by a banner explaining
+  // that -- confusing enough on its own that it needed asking about
+  // directly. Now genuinely mode-aware: switching modes re-fetches and
+  // shows THAT mode's own real numbers (get_cached_realizations already
+  // supports any Mode, see app/accounting.py), not a fixed paper-only
+  // view with a disclaimer bolted on.
   React.useEffect(() => {
-    api.dashboard.stats().then(setStats);
-    api.dashboard.calendar().then(setCalendar);
-  }, []);
+    setStats(null);
+    setCalendar([]);
+    api.dashboard.stats(mode).then(setStats);
+    api.dashboard.calendar(mode).then(setCalendar);
+  }, [mode]);
 
   let running = 0;
   const equityCurve = calendar.map((d) => (running += d.pnl));
@@ -88,14 +99,13 @@ export function Dashboard() {
   return html`
     <div class="page fade-in">
       <h1 style=${{ margin: "0 0 4px", fontSize: "20px", fontWeight: 800, letterSpacing: "-0.01em" }}>Dashboard</h1>
-      <div style=${{ color: "var(--text-faint)", fontSize: "12px", marginBottom: "20px" }}>Performance across every strategy and manual trade, paper mode</div>
+      <div style=${{ color: "var(--text-faint)", fontSize: "12px", marginBottom: "20px" }}>Performance across every strategy and manual trade, ${MODE_LABEL[mode] ?? mode}</div>
 
-      ${mode !== "paper" && html`
+      ${mode === "live" && html`
         <div class="notice-banner" style=${{ marginBottom: "18px" }}>
-          <strong>Paper mode data, always:</strong> this dashboard tracks paper-mode strategy/manual-trade
-          performance only, and keeps updating from real ongoing paper activity regardless of which mode you have
-          selected (currently ${mode}) -- it is not showing ${mode} activity, and there may be none. Switch to
-          Paper mode to trade against what's shown here.
+          <strong>Real trading activity:</strong> these numbers come from your actual Angel One trades, not a
+          simulation -- a new live account will show sparse or empty stats here simply because there isn't much
+          history yet, not because anything is broken.
         </div>
       `}
 
