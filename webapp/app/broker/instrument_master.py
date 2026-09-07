@@ -95,6 +95,11 @@ _equity_names_sorted: list[str] | None = None  # same set, sorted once for list_
 # threads burning CPU on redundant parses of the identical file,
 # competing for the GIL, not a hang.
 _load_lock = threading.Lock()
+# The in-flight background refresh, if any -- guarded by its own small
+# lock rather than _load_lock, since checking "is one already running?"
+# must NOT block behind the refresh it's asking about.
+_refresh_thread: threading.Thread | None = None
+_refresh_thread_lock = threading.Lock()
 
 
 def _fetch_and_cache() -> None:
@@ -161,7 +166,79 @@ def _load_from_disk() -> tuple[dict[str, list[OptionContract]], set[str]]:
     return by_underlying, equity_names
 
 
+def _refresh_in_background() -> None:
+    """Downloads a fresh master and re-parses it WITHOUT any request
+    waiting on it -- see _ensure_loaded's own docstring on the 101s
+    request this exists to stop happening."""
+    global _cache, _cache_loaded_at, _underlyings_sorted, _equity_names, _equity_names_sorted
+    global _refresh_thread
+
+    try:
+        with _load_lock:
+            _fetch_and_cache()
+            parsed, equities = _load_from_disk()
+            # Published only after BOTH steps succeed -- a failed download
+            # or a half-parsed file must never replace a good in-memory
+            # copy that's still serving requests perfectly well.
+            _cache, _equity_names = parsed, equities
+            _cache_loaded_at = time.time()
+            _underlyings_sorted = sorted(_cache.keys())
+            _equity_names_sorted = sorted(_equity_names)
+            log.info(
+                "Refreshed Angel One instrument master in the background: %d underlyings, %d equities",
+                len(_underlyings_sorted), len(_equity_names_sorted),
+            )
+    except Exception:
+        # A background refresh failing is a real, expected, survivable
+        # state (network down, Angel One's file unavailable): the existing
+        # copy keeps serving, and the next call retries. Logged, never
+        # raised -- there is no caller left to raise to.
+        log.exception("Background instrument-master refresh failed; keeping the existing copy")
+    finally:
+        with _refresh_thread_lock:
+            _refresh_thread = None
+
+
+def _start_background_refresh() -> None:
+    global _refresh_thread
+    with _refresh_thread_lock:
+        if _refresh_thread is not None and _refresh_thread.is_alive():
+            return  # one refresh at a time -- a 33MB download doesn't need doing twice at once
+        _refresh_thread = threading.Thread(
+            target=_refresh_in_background, name="instrument-master-refresh", daemon=True,
+        )
+        _refresh_thread.start()
+
+
 def _ensure_loaded(force_refresh: bool = False) -> None:
+    """Guarantees an instrument master is loaded, and -- unless
+    force_refresh is set -- guarantees the CALLER never pays for a
+    download.
+
+    Real latency bug this closes (measured 2026-09-07, directly against
+    the running server): GET /symbols took 101.5 SECONDS. The parse is
+    only 0.17s of that; the other ~101s was the real 33MB download of
+    Angel One's master file, run inline inside a user's request the first
+    time the on-disk copy went a day stale. GET /symbols is called by
+    Ticker.js on mount on EVERY page, and this function's own _load_lock
+    is shared with the options-chain and live-equities endpoints, so that
+    one unlucky request stalled the whole app for a minute and a half --
+    exactly the "nothing renders" symptom, from a cache refresh rather
+    than from anything being genuinely wrong.
+
+    Staleness is now handled stale-while-revalidate: an already-loaded
+    copy is served IMMEDIATELY and a refresh runs on a background thread.
+    That's sound here for the same reason the daily interval itself is
+    (option listings don't change intraday, per REFRESH_INTERVAL_SECONDS'
+    own comment) -- serving a copy a few minutes past its refresh time
+    while a new one downloads is strictly better than making someone wait
+    100s for it, and no caller is ever handed a partially-parsed file.
+
+    A caller with NO copy at all still blocks, because there is genuinely
+    nothing to serve -- but app startup warms this in the background (see
+    app/main.py's lifespan), so a real request should never be the one
+    that finds it cold.
+    """
     global _cache, _cache_loaded_at, _underlyings_sorted, _equity_names, _equity_names_sorted
 
     # Cheap lock-free fast path for the overwhelming majority of calls
@@ -170,6 +247,10 @@ def _ensure_loaded(force_refresh: bool = False) -> None:
     if _cache is not None and not force_refresh and CACHE_PATH.exists():
         if time.time() - CACHE_PATH.stat().st_mtime <= REFRESH_INTERVAL_SECONDS:
             return
+        # Stale but usable: hand back what's already in memory right now
+        # and let a background thread do the slow part.
+        _start_background_refresh()
+        return
 
     with _load_lock:
         # Re-check inside the lock: another thread may have already done
@@ -177,14 +258,20 @@ def _ensure_loaded(force_refresh: bool = False) -> None:
         # was waiting to acquire it -- without this, N threads that all
         # saw `_cache is None` on the fast path above would each still
         # queue up and redundantly redo the full parse one after another.
-        needs_download = force_refresh or not CACHE_PATH.exists()
-        if not needs_download:
-            age_seconds = time.time() - CACHE_PATH.stat().st_mtime
-            needs_download = age_seconds > REFRESH_INTERVAL_SECONDS
+        if _cache is not None and not force_refresh and CACHE_PATH.exists():
+            if time.time() - CACHE_PATH.stat().st_mtime <= REFRESH_INTERVAL_SECONDS:
+                return
 
-        if needs_download:
+        # A caller blocks on the download ONLY when there is genuinely
+        # nothing to serve (no file at all) or it explicitly asked for a
+        # forced refresh. A stale file still on disk is parsed and served
+        # -- 0.17s, versus the ~101s download it replaces -- with the
+        # refresh handed to a background thread.
+        if force_refresh or not CACHE_PATH.exists():
             _fetch_and_cache()
             _cache = None  # force a re-parse below even if this process already had an in-memory copy
+        elif time.time() - CACHE_PATH.stat().st_mtime > REFRESH_INTERVAL_SECONDS:
+            _start_background_refresh()
 
         if _cache is None:
             _cache, _equity_names = _load_from_disk()

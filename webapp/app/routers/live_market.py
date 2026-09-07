@@ -223,7 +223,18 @@ def get_live_quotes(
     unresolved: list[str] = []
     for sym in symbol_list:
         try:
-            match = adapter.resolve_equity_symbol("NSE", sym)
+            # background=True: this endpoint serves the ambient ticker
+            # strip, which asks for the WHOLE live universe at once and
+            # which nobody is sitting and waiting on -- unlike the chart,
+            # order book or an order confirmation on the page in front of
+            # them. Every symbol here needs its own real resolution the
+            # first time, and they run one at a time through the adapter's
+            # single call slot, so without this flag the strip's backlog
+            # sits in front of whatever the user is actually looking at:
+            # measured at 25.4s across 22 names during the 2026-09-07
+            # Angel One scrip-master outage, when each lookup had to fail
+            # a full round trip before the next could start.
+            match = adapter.resolve_equity_symbol("NSE", sym, background=True)
         except AngelOneError:
             unresolved.append(sym)
             continue
@@ -232,7 +243,7 @@ def get_live_quotes(
     quote_by_token = {}
     if token_to_symbol:
         try:
-            quote_by_token = adapter.get_quote_batch({"NSE": list(token_to_symbol)})
+            quote_by_token = adapter.get_quote_batch({"NSE": list(token_to_symbol)}, background=True)
         except AngelOneError as e:
             raise HTTPException(status_code=502, detail=f"Angel One quote fetch failed: {e}")
 

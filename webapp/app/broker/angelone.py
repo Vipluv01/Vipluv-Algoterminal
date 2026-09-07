@@ -43,6 +43,8 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Callable
@@ -71,6 +73,73 @@ _RATE_LIMIT_SIGNATURE = "exceeding access rate"
 
 def _is_rate_limited(exc: Exception) -> bool:
     return _RATE_LIMIT_SIGNATURE in str(exc)
+
+
+class _PriorityGate:
+    """Admits exactly ONE holder at a time (same bound a Semaphore(1)
+    gave), but when several threads are already waiting, hands the slot
+    to a FOREGROUND waiter before any BACKGROUND one.
+
+    Why this exists, from a real incident (2026-09-07): the ticker strip
+    polls every live-tradable name at once, and each name needs its own
+    real symbol->token resolution the first time. With a plain
+    Semaphore(1) -- which has no notion of what a waiter is FOR -- those
+    22 sequential lookups and the chart's own single lookup are
+    indistinguishable, so the chart's request could sit behind the entire
+    strip's backlog. Measured directly during an Angel One scrip-master
+    outage, when every one of those lookups had to fail its full round
+    trip first: 25.4s of ticker backlog in front of the one request the
+    user was actually waiting on.
+
+    This does NOT raise concurrency -- still one real call in flight,
+    deliberately (see _call_semaphore's own history: 4 and then 2
+    concurrent were both tried against the real broker and BOTH produced
+    more rate-limit rejections than full serialization, with no wall-clock
+    win). It only changes WHO goes next among threads already queued,
+    which is free: no extra calls, no extra concurrency, no change to any
+    individual call's behavior.
+
+    Starvation is bounded by construction rather than by fairness
+    bookkeeping: foreground work here is always a small, finite set of
+    user-visible requests (one chart, one order book, one order
+    confirmation), never an unbounded stream, so background waiters
+    cannot be deferred indefinitely -- and a background caller that is
+    the only waiter is never delayed at all.
+    """
+
+    def __init__(self):
+        self._mutex = threading.Lock()
+        self._busy = False
+        self._foreground: deque[threading.Event] = deque()
+        self._background: deque[threading.Event] = deque()
+
+    def acquire(self, *, background: bool = False) -> None:
+        with self._mutex:
+            if not self._busy:
+                self._busy = True
+                return
+            waiter = threading.Event()
+            (self._background if background else self._foreground).append(waiter)
+        # Ownership is handed over directly by release() below (self._busy
+        # stays True across the handoff), so a thread woken here already
+        # holds the slot and must not re-check or re-acquire it.
+        waiter.wait()
+
+    def release(self) -> None:
+        with self._mutex:
+            queue = self._foreground or self._background
+            if queue:
+                queue.popleft().set()
+            else:
+                self._busy = False
+
+    @contextmanager
+    def held(self, *, background: bool = False):
+        self.acquire(background=background)
+        try:
+            yield
+        finally:
+            self.release()
 
 
 # One short wait before a single retry on the SAME session -- long enough
@@ -219,7 +288,13 @@ class AngelOneAdapter:
         # see resolve_equity_symbol's own cache for the real lever that
         # DOES help here without betting the account on an unverified
         # concurrency assumption a second time.
-        self._call_semaphore = threading.Semaphore(1)
+        #
+        # Still exactly one call in flight; the gate replaced a plain
+        # Semaphore(1) only so that WAITERS are ordered by what they're
+        # for (a chart the user is looking at vs. the ticker strip's bulk
+        # refresh) instead of by arrival. See _PriorityGate's own
+        # docstring for the measured 25.4s starvation that motivated it.
+        self._call_gate = _PriorityGate()
         # resolve_equity_symbol's result, keyed by (exchange, symbol) --
         # ticker->symboltoken is effectively permanent for this adapter's
         # lifetime (barring a rare corporate action, which would surface
@@ -295,10 +370,18 @@ class AngelOneAdapter:
         self._feed_token = response["data"]["feedToken"]
         self._logged_in_at = time.monotonic()
 
-    def _call(self, fn: Callable[[], dict]):
+    def _call(self, fn: Callable[[], dict], *, background: bool = False):
         """Runs one SmartConnect call, transparently handling session
         expiry: refresh-token renewal first (cheap, no TOTP), then a full
         re-login (needs a fresh TOTP) if that also fails, then propagates.
+
+        background=True marks a call as bulk/ambient work that no one is
+        directly waiting on (the ticker strip's whole-universe refresh),
+        so it yields the single call slot to anything a user is actually
+        looking at. Default False -- every call is foreground unless a
+        caller has a specific reason to say otherwise, since the cost of
+        wrongly deprioritizing real user-facing work is much higher than
+        the cost of not deprioritizing background work.
         "Don't assume one login lasts the process lifetime" -- this is
         that assumption never being made anywhere calls actually happen.
 
@@ -317,9 +400,10 @@ class AngelOneAdapter:
         Two-tier concurrency control, not one lock around everything --
         see the class docstring for why a single full-duration lock (the
         first fix for the original race) turned into its own real
-        problem under actual market-hours load. self._call_semaphore
-        bounds how many real HTTP calls run at once (throughput/broker-
-        load concern, not correctness). self._call_lock guards ONLY the
+        problem under actual market-hours load. self._call_gate bounds
+        how many real HTTP calls run at once (throughput/broker-load
+        concern, not correctness) and orders the queue behind it by
+        `background`. self._call_lock guards ONLY the
         session-mutating recovery path (login/_refresh writing
         self._client's shared tokens) -- the ACTUAL race this whole
         design exists to prevent: two threads independently deciding
@@ -342,7 +426,7 @@ class AngelOneAdapter:
         code for no reason. A rate-limited call instead gets ONE short
         wait-and-retry on the SAME session -- no lock, no mutation.
         """
-        with self._call_semaphore:
+        with self._call_gate.held(background=background):
             first_exc: Exception | None = None
             if self._client is not None:
                 try:
@@ -394,7 +478,7 @@ class AngelOneAdapter:
 
     # -- trading ---------------------------------------------------------
 
-    def search_symbol_token(self, exchange: str, query: str) -> list[dict]:
+    def search_symbol_token(self, exchange: str, query: str, *, background: bool = False) -> list[dict]:
         """exchange e.g. "NSE"; query e.g. "RELIANCE" -- returns whatever
         SmartAPI's own searchScrip finds (each item has at least exchange/
         tradingsymbol/symboltoken), so a caller can resolve a human symbol
@@ -412,12 +496,12 @@ class AngelOneAdapter:
         one place this filtering happens; do not re-implement it at a
         call site.
         """
-        response = self._call(lambda: self._client.searchScrip(exchange, query))
+        response = self._call(lambda: self._client.searchScrip(exchange, query), background=background)
         if not response or not response.get("status"):
             return []
         return response.get("data") or []
 
-    def resolve_equity_symbol(self, exchange: str, symbol: str) -> dict:
+    def resolve_equity_symbol(self, exchange: str, symbol: str, *, background: bool = False) -> dict:
         """The ONLY safe way to turn a human ticker into the symboltoken an
         order should actually route to -- see search_symbol_token's own
         docstring for why matches[0] is a real-money-safety bug (confirmed
@@ -466,7 +550,7 @@ class AngelOneAdapter:
             )
 
         try:
-            matches = self.search_symbol_token(exchange, symbol)
+            matches = self.search_symbol_token(exchange, symbol, background=background)
             expected = f"{symbol.upper()}-EQ"
             equity_matches = [
                 m for m in matches
@@ -576,7 +660,7 @@ class AngelOneAdapter:
             bars.append({"timestamp_ms": ts_ms, "open": o, "high": h, "low": l, "close": c, "volume": v})
         return bars
 
-    def get_quote_batch(self, exchange_tokens: dict[str, list[str]]) -> dict[str, "Quote"]:
+    def get_quote_batch(self, exchange_tokens: dict[str, list[str]], *, background: bool = False) -> dict[str, "Quote"]:
         """Real, batched quotes via getMarketData -- confirmed live,
         2026-09-03, to fetch multiple tokens across DIFFERENT exchange
         segments (e.g. NSE equity + NFO options) in one real call. This
@@ -626,7 +710,9 @@ class AngelOneAdapter:
             batch_by_exchange: dict[str, list[str]] = {}
             for exchange, token in batch:
                 batch_by_exchange.setdefault(exchange, []).append(token)
-            response = self._call(lambda be=batch_by_exchange: self._client.getMarketData("FULL", be))
+            response = self._call(
+                lambda be=batch_by_exchange: self._client.getMarketData("FULL", be), background=background,
+            )
             if not response or not response.get("status"):
                 message = (response or {}).get("message", "market data request failed")
                 raise AngelOneError(f"Angel One batch quote failed: {message}")

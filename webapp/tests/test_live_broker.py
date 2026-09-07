@@ -327,6 +327,77 @@ def test_concurrent_calls_through_one_shared_adapter_stay_serialized(fake_client
     assert max_concurrent == 1, "concurrent calls through the same adapter must never actually overlap"
 
 
+def test_a_user_facing_call_is_served_before_already_queued_background_work(fake_client):
+    """The real starvation this fixes, measured 2026-09-07 during an
+    Angel One scrip-master outage: GET /live/market/quotes (the ticker
+    strip) resolves the WHOLE live universe one symbol at a time through
+    this adapter's single call slot, and with every lookup failing its
+    full round trip that queue took 25.4s end to end. A plain
+    Semaphore(1) can't tell those 22 ambient lookups apart from the one
+    chart fetch the user is actually waiting on, so the chart waited
+    behind all of them.
+
+    Ordering, not concurrency, is what changed -- still exactly one call
+    in flight (the test above pins that, and its own docstring records
+    why raising it was tried twice against the real broker and rejected
+    both times). The foreground call here is queued LAST and must still
+    run FIRST."""
+    adapter = AngelOneAdapter(_creds())
+    adapter.login()
+
+    started: list[str] = []
+    state_lock = threading.Lock()
+    release_first_call = threading.Event()
+
+    def _tracking_search_scrip(exchange, query):
+        with state_lock:
+            started.append(query)
+        if query == "OCCUPIER":
+            # Holds the one call slot open until the test has queued
+            # everything else behind it, so what's being asserted is the
+            # gate's ordering of real waiters, not a race on who got
+            # there first.
+            release_first_call.wait(timeout=5)
+        return {"status": True, "data": [{"exchange": "NSE", "tradingsymbol": f"{query}-EQ", "symboltoken": "1"}]}
+
+    adapter._client.searchScrip = _tracking_search_scrip
+
+    def _queued(count):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            with adapter._call_gate._mutex:
+                if len(adapter._call_gate._background) + len(adapter._call_gate._foreground) >= count:
+                    return True
+            time.sleep(0.005)
+        return False
+
+    occupier = threading.Thread(target=lambda: adapter.search_symbol_token("NSE", "OCCUPIER"))
+    occupier.start()
+    while not started:
+        time.sleep(0.005)  # the slot is genuinely held before anything queues behind it
+
+    background = [
+        threading.Thread(target=lambda q=q: adapter.search_symbol_token("NSE", q, background=True))
+        for q in ("BULK1", "BULK2", "BULK3")
+    ]
+    for t in background:
+        t.start()
+    assert _queued(3), "background work should be waiting on the gate"
+
+    foreground = threading.Thread(target=lambda: adapter.search_symbol_token("NSE", "CHART"))
+    foreground.start()
+    assert _queued(4), "the user-facing call should be waiting too, queued after the bulk work"
+
+    release_first_call.set()
+    for t in [occupier, foreground, *background]:
+        t.join(timeout=5)
+
+    assert started[0] == "OCCUPIER"
+    assert started[1] == "CHART", (
+        f"the user-facing call must jump ahead of already-queued bulk work, got {started}"
+    )
+
+
 def test_concurrent_session_failures_never_race_the_relogin_path(fake_client):
     """The actual correctness property _call_lock exists for -- NOT "no
     two calls ever overlap" (the previous, over-strict version of this

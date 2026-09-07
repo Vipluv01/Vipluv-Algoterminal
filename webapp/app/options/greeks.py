@@ -10,10 +10,11 @@ qty-per-contract a second way here.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from sqlalchemy.orm import Session
 
-from app.accounting import compute_account
+from app.accounting import get_cached_account_snapshot
 from app.markets import MarketRegistry
 from app.models.trading import InstrumentType, Mode, Order
 from app.models.user import User
@@ -73,7 +74,22 @@ class GreeksResponse:
     stress: list[UnderlyingStress]
 
 
-def _stress_underlying(underlying: str, spot: float, legs: list[tuple[Order, int]], sigma0: float) -> UnderlyingStress:
+class _ContractMeta(Protocol):
+    """Just the option-identity fields the greeks math reads. Satisfied by
+    a full Order and equally by the narrow (symbol, underlying, strike,
+    expiry, option_type) row get_portfolio_greeks actually selects -- the
+    identity of a contract is these five fields, not a whole order row."""
+
+    symbol: str
+    underlying: str
+    strike: float
+    expiry: str
+    option_type: str
+
+
+def _stress_underlying(
+    underlying: str, spot: float, legs: list[tuple[_ContractMeta, int]], sigma0: float,
+) -> UnderlyingStress:
     """sigma0 is held FIXED across the shifted-spot scenarios below --
     that's a deliberate simplification (a real move would also shift
     realized/implied vol, a "vol smile moving with spot" effect this
@@ -96,9 +112,6 @@ def _stress_underlying(underlying: str, spot: float, legs: list[tuple[Order, int
 
 
 def get_portfolio_greeks(db: Session, user: User, registry: MarketRegistry) -> GreeksResponse:
-    orders = db.query(Order).filter(Order.user_id == user.id, Order.mode == Mode.paper).all()
-    option_orders = [o for o in orders if o.instrument_type == InstrumentType.option]
-
     base_prices = registry.current_prices()
     option_marks = mark_option_positions(db, user.id, registry)
     prices = {**base_prices, **option_marks}
@@ -108,13 +121,34 @@ def get_portfolio_greeks(db: Session, user: User, registry: MarketRegistry) -> G
     # at submit_option_paper_order time and a contract key encodes exactly
     # those fields) -- so any one order for a symbol is a valid source of
     # that symbol's option identity; last one found simply wins.
-    meta_by_symbol: dict[str, Order] = {o.symbol: o for o in option_orders}
+    #
+    # Five columns, DISTINCT, not every order the user has ever placed:
+    # this used to pull the whole history as full ORM objects (108,328
+    # rows, measured 2026-09-07 -- 0.78s just to materialize, on every
+    # single request) to filter down to the option rows and hand the same
+    # list to compute_account. The snapshot half is now the shared
+    # incremental cache below; this half reads only the identity fields
+    # it actually uses, one row per contract (63,736 -> 19 here), which is
+    # the same collapse mark_option_positions makes for the same reason
+    # and is exact for the same documented invariant.
+    meta_rows = (
+        db.query(Order.symbol, Order.underlying, Order.strike, Order.expiry, Order.option_type)
+        .filter(Order.user_id == user.id, Order.mode == Mode.paper,
+                Order.instrument_type == InstrumentType.option)
+        .distinct()
+        .all()
+    )
+    meta_by_symbol = {row.symbol: row for row in meta_rows}
 
-    snapshot = compute_account(orders, prices, only_primary=True)
+    # Same real numbers as compute_account over every paper order, without
+    # re-walking the entire history per request -- see
+    # get_cached_account_snapshot's own docstring. only_primary=True is
+    # preserved exactly as before.
+    snapshot = get_cached_account_snapshot(db, user.id, Mode.paper, prices, only_primary=True)
 
     positions: list[OptionPositionGreeks] = []
     per_position_greeks: list[Greeks] = []
-    by_underlying: dict[str, list[tuple[Order, int]]] = {}
+    by_underlying: dict[str, list[tuple[_ContractMeta, int]]] = {}
     sigma0_by_underlying: dict[str, float] = {}
 
     for symbol, pos in snapshot.positions.items():

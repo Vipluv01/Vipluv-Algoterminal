@@ -8,6 +8,7 @@ module's own docstring)."""
 from __future__ import annotations
 
 import json
+import threading
 import time
 
 import pytest
@@ -62,7 +63,15 @@ def _isolated_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(im, "_underlyings_sorted", None)
     monkeypatch.setattr(im, "_equity_names", None)
     monkeypatch.setattr(im, "_equity_names_sorted", None)
+    monkeypatch.setattr(im, "_refresh_thread", None)
     yield
+    # A background refresh outliving its test would keep running against
+    # a tmp_path that's about to be deleted, and would land its results in
+    # the NEXT test's module state -- the same cross-test leak this
+    # fixture's per-test cache reset exists to prevent.
+    leftover = im._refresh_thread
+    if leftover is not None:
+        leftover.join(timeout=5)
 
 
 def test_loads_and_filters_to_option_instruments_only():
@@ -185,7 +194,13 @@ def test_concurrent_callers_only_parse_the_file_once(monkeypatch):
 
 def test_refreshes_only_when_the_cached_file_is_stale(monkeypatch):
     fetch_calls = []
-    monkeypatch.setattr(im, "_fetch_and_cache", lambda: fetch_calls.append(1))
+    fetch_started = threading.Event()
+
+    def _fake_fetch():
+        fetch_calls.append(1)
+        fetch_started.set()
+
+    monkeypatch.setattr(im, "_fetch_and_cache", _fake_fetch)
 
     im.list_option_underlyings()  # cache file exists and is fresh -- must NOT trigger a fetch
     assert fetch_calls == []
@@ -196,4 +211,43 @@ def test_refreshes_only_when_the_cached_file_is_stale(monkeypatch):
     os.utime(im.CACHE_PATH, (old_time, old_time))
     monkeypatch.setattr(im, "_cache", None)
     im.list_option_underlyings()
+    assert fetch_started.wait(timeout=5), "a stale cache must still trigger a real refresh"
     assert fetch_calls == [1]
+
+
+def test_a_stale_cache_is_served_immediately_instead_of_blocking_on_the_download(monkeypatch):
+    """Regression test for a real latency bug measured 2026-09-07 against
+    the running server: GET /symbols took 101.5 SECONDS. Only 0.17s of
+    that was the parse -- the rest was Angel One's real 33MB master file
+    being downloaded INSIDE the request, the first time the on-disk copy
+    went a day stale. Ticker.js calls /symbols on mount on every page, and
+    this module's load lock is shared with the options-chain and
+    live-equities endpoints, so one unlucky request stalled the whole app.
+
+    The download still happens (the assertion above covers that) -- it
+    just must never be something a caller waits on when there's a usable
+    copy already on disk."""
+    download_running = threading.Event()
+    let_download_finish = threading.Event()
+
+    def _slow_fetch():
+        download_running.set()
+        assert let_download_finish.wait(timeout=5)
+
+    monkeypatch.setattr(im, "_fetch_and_cache", _slow_fetch)
+
+    old_time = time.time() - im.REFRESH_INTERVAL_SECONDS - 60
+    import os
+    os.utime(im.CACHE_PATH, (old_time, old_time))
+
+    started = time.monotonic()
+    names = im.list_live_equity_names()
+    elapsed = time.monotonic() - started
+
+    # Served from the stale-but-usable copy, while the "download" is still
+    # deliberately blocked and hasn't returned anything.
+    assert "RELIANCE" in names
+    assert elapsed < 2.0, f"a stale cache must not block the caller on the download (took {elapsed:.2f}s)"
+    assert download_running.wait(timeout=5), "the refresh should still be happening, in the background"
+
+    let_download_finish.set()

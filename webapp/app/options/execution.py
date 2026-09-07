@@ -110,14 +110,23 @@ def mark_option_positions(db: Session, user_id: int, registry: MarketRegistry) -
     # (symbol, underlying, strike, expiry, option_type) and de-dupe by
     # symbol was a real, measurable chunk of GET /account's latency --
     # this account panel is polled every few seconds (AccountPanel.js),
-    # so that cost was being paid over and over. De-duped in Python, NOT
-    # via .distinct(Order.symbol) at the SQL level -- that emits
-    # PostgreSQL's own DISTINCT ON syntax, which SQLite (this app's local
-    # dev/test database) doesn't support at all.
+    # so that cost was being paid over and over. De-duped by the DATABASE
+    # now, not in Python -- note this is a bare multi-column .distinct()
+    # (standard SELECT DISTINCT, which SQLite and PostgreSQL both run),
+    # NOT .distinct(Order.symbol), which emits PostgreSQL's own DISTINCT
+    # ON syntax that SQLite doesn't support at all. Collapsing on the
+    # whole tuple is exactly equivalent to the old per-symbol Python
+    # de-dupe because of the invariant above (every row for a symbol
+    # carries identical underlying/strike/expiry/option_type) -- confirmed
+    # directly against this account, 2026-09-07: 63,736 rows -> 19, the
+    # same 19 contracts, tuple for tuple. Narrowing the COLUMNS was
+    # already a real win; the row count itself still grew forever with
+    # the account's history, which this removes.
     rows = (
         db.query(Order.symbol, Order.underlying, Order.strike, Order.expiry, Order.option_type)
         .filter(Order.user_id == user_id, Order.instrument_type == InstrumentType.option,
                 Order.status.in_([OrderStatus.filled, OrderStatus.partially_filled]))
+        .distinct()
         .all()
     )
     marks: dict[str, float] = {}

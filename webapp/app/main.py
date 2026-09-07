@@ -9,6 +9,7 @@ yet. Those are later phases.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -42,6 +43,7 @@ from fastapi.staticfiles import StaticFiles
 from app.auth import DEV_USER_GOOGLE_SUB
 from app.brackets import monitor_brackets
 from app.broker.adapter_cache import IncompleteBrokerCredentialError, NoBrokerCredentialError, get_adapter_for_user
+from app.broker import instrument_master
 from app.broker.angelone import AngelOneError
 from app.db import SessionLocal
 from app.execution.slicer import run_algo_orders_once
@@ -56,6 +58,8 @@ from app.routers import (
     orders, pairs, portfolio, risk, strategies, telemetry, vault, virtual,
 )
 from app.strategy_runner import run_strategies_once
+
+log = logging.getLogger(__name__)
 
 MARKET_TICK_SECONDS = 1.0
 
@@ -119,8 +123,60 @@ async def _tick_loop(registry: MarketRegistry) -> None:
         await asyncio.sleep(MARKET_TICK_SECONDS)
 
 
-def _warm_live_symbol_cache_sync() -> None:
-    """Runs OFF the event loop (via asyncio.to_thread below) -- every
+def _warm_accounting_caches(db, user_id: int, registry: MarketRegistry) -> None:
+    """Pays each incremental accounting cache's ONE-TIME full walk here,
+    at startup, instead of making a real request be the one that pays it.
+
+    Measured 2026-09-07 against a real 108,328-order paper account, first
+    call after a restart vs. every call after that: /account/equity-curve
+    3.16s -> 0.20s, /portfolio/realized-pnl-curve 3.21s -> 0.19s,
+    /dashboard/stats 2.82s -> 0.008s, /pairs/overview 2.53s -> 0.03s.
+    The caches themselves already worked; nothing had warmed them, so a
+    restart put that cliff in front of whoever loaded the app first --
+    and they're separate caches, so one page load could hit several.
+
+    Best-effort by design, exactly like the live symbol warm-up below:
+    any failure here just leaves a cache cold, which is the pre-existing
+    (correct, merely slower) behavior, never a startup failure."""
+    from app.accounting import (
+        get_cached_account_snapshot, get_cached_equity_curve,
+        get_cached_realizations, get_cached_realized_pnl_curve,
+    )
+    from app.models.trading import Mode
+    from app.market_price_lookup import historical_price_lookup
+    from app.pairs_service import PAIRS_STRATEGY_KEY, compute_pair_position_state
+
+    try:
+        prices = registry.current_prices()
+        lookup = historical_price_lookup(registry)
+        for mode in (Mode.paper, Mode.virtual):
+            get_cached_account_snapshot(db, user_id, mode, prices)
+            get_cached_realizations(db, user_id, mode)
+            get_cached_realized_pnl_curve(db, user_id, mode)
+            get_cached_equity_curve(db, user_id, mode, lookup)
+
+        # The snapshot cache is keyed by its FULL argument set, so these
+        # two callers have their own separate entries and their own
+        # separate cold walks -- warming only the default above left both
+        # still paying ~2.6s on the first real request (measured directly
+        # after a restart, which is how they were caught).
+        get_cached_account_snapshot(db, user_id, Mode.paper, prices, only_primary=True)  # options greeks
+        get_cached_account_snapshot(  # pairs overview/analytics
+            db, user_id, Mode.paper, prices, starting_cash=0.0, strategy_key=PAIRS_STRATEGY_KEY,
+        )
+        compute_pair_position_state(db, user_id)
+    except Exception:
+        log.exception("Accounting-cache warm-up failed; caches will fill on first real use instead")
+
+
+def _warm_caches_sync(registry: MarketRegistry) -> None:
+    """Every warm-up this app does at startup, in one place: the Angel One
+    instrument master, the incremental accounting caches, and the live
+    symbol->token resolutions. All three exist for the same reason -- each
+    is a real one-time cost that, unwarmed, lands on whichever request
+    happens to arrive first after a restart.
+
+    Runs OFF the event loop (via asyncio.to_thread below) -- every
     resolve_equity_symbol call here is real, synchronous Angel One I/O,
     the same reason live_market.py's own WS _connect() offloads.
 
@@ -144,11 +200,28 @@ def _warm_live_symbol_cache_sync() -> None:
     startup path must survive -- live mode simply stays uncached until
     first real use in any of those cases, exactly like before this
     warm-up existed."""
+    # Before the per-symbol resolution below, and deliberately outside the
+    # credential checks that follow it: the instrument master is a plain
+    # public file download, needed by GET /symbols (which Ticker.js calls
+    # on mount on EVERY page, in every mode) whether or not a broker
+    # credential exists at all. Warming it here is what keeps a real
+    # request from being the one that pays for the 33MB download --
+    # measured at 101.5s inside GET /symbols before this existed. Failures
+    # are swallowed for the same reason the rest of this function's are:
+    # an unwarmed cache is the old, already-survivable behavior.
+    try:
+        instrument_master._ensure_loaded()
+    except Exception:
+        log.exception("Instrument-master warm-up failed; it will load on first real use instead")
+
     db = SessionLocal()
     try:
         user = db.query(User).filter(User.google_sub == DEV_USER_GOOGLE_SUB).first()
         if user is None:
             return
+
+        _warm_accounting_caches(db, user.id, registry)
+
         try:
             adapter = get_adapter_for_user(db, user.id)
         except (NoBrokerCredentialError, IncompleteBrokerCredentialError):
@@ -180,7 +253,7 @@ async def lifespan(app: FastAPI):
     # old, already-acceptable behavior) if this hasn't finished yet.
     warmup_task = (
         None if DISABLE_LIVE_WARMUP
-        else asyncio.create_task(asyncio.to_thread(_warm_live_symbol_cache_sync))
+        else asyncio.create_task(asyncio.to_thread(_warm_caches_sync, registry))
     )
     try:
         yield

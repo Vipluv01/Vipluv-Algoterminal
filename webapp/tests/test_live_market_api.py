@@ -168,14 +168,21 @@ class _QuotesStubAdapter:
         self.resolvable = resolvable  # {symbol: symboltoken}
         self.quotes_by_token = quotes_by_token  # {token: Quote}
         self.last_quote_batch_tokens = None
+        # Recorded, not just accepted: this endpoint serves the ambient
+        # ticker strip, and marking its calls background is what keeps
+        # the whole live universe's resolution from queueing in front of
+        # the chart a user is actually looking at (see _PriorityGate).
+        self.backgrounded = []
 
-    def resolve_equity_symbol(self, exchange, symbol):
+    def resolve_equity_symbol(self, exchange, symbol, *, background=False):
+        self.backgrounded.append(background)
         if symbol not in self.resolvable:
             raise AngelOneError(f"could not resolve {symbol!r} to a standard NSE equity instrument")
         return {"exchange": exchange, "tradingsymbol": f"{symbol}-EQ", "symboltoken": self.resolvable[symbol]}
 
-    def get_quote_batch(self, exchange_tokens):
+    def get_quote_batch(self, exchange_tokens, *, background=False):
         self.last_quote_batch_tokens = exchange_tokens
+        self.backgrounded.append(background)
         return self.quotes_by_token
 
 
@@ -218,6 +225,31 @@ def test_live_quotes_one_unresolvable_symbol_does_not_blank_the_others(client, m
     assert by_symbol["RELIANCE"]["ltp"] == 1430.0
     assert by_symbol["TATAMOTORS"]["ltp"] is None
     assert by_symbol["TATAMOTORS"]["close"] is None
+
+
+def test_the_ticker_strips_own_calls_are_marked_background(client, monkeypatch):
+    """The priority gate in AngelOneAdapter only helps if the ambient
+    work is actually LABELLED ambient -- this is the wiring, and without
+    it the gate is inert.
+
+    Measured 2026-09-07: this endpoint resolves the whole live universe
+    one symbol at a time through the adapter's single call slot, 25.4s
+    end-to-end during an Angel One scrip-master outage. Nobody waits on
+    the ticker strip; they wait on the chart, which was stuck behind
+    it."""
+    stub = _QuotesStubAdapter(
+        resolvable={"RELIANCE": "2885", "ICICIBANK": "4963"},
+        quotes_by_token={
+            "2885": Quote(ltp=1430.0, close=1420.0, best_bid=None, best_ask=None),
+            "4963": Quote(ltp=1250.0, close=1245.0, best_bid=None, best_ask=None),
+        },
+    )
+    monkeypatch.setattr("app.routers.live_market.get_adapter_for_user", lambda db, user_id: stub)
+
+    assert client.get("/live/market/quotes", params={"symbols": "RELIANCE,ICICIBANK"}).status_code == 200
+    assert stub.backgrounded and all(stub.backgrounded), (
+        f"every call this endpoint makes should yield to user-facing work, got {stub.backgrounded}"
+    )
 
 
 def test_live_equities_returns_the_full_real_universe_not_just_named_instruments(client, monkeypatch):

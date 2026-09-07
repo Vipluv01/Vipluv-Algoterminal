@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Query, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db import Base
 from app.markets import MarketRegistry
+from app.models.trading import Mode, Order, OrderStatus, OrderType, Side
 from app.models.user import User
 from app.options import chain
 from app.options.execution import submit_option_paper_order
@@ -99,6 +102,71 @@ def test_position_greeks_match_bsm_greeks_scaled_by_qty(db, user, registry):
     assert pos.greeks.delta == pytest.approx(expected.delta * qty)
     assert pos.greeks.gamma == pytest.approx(expected.gamma * qty)
     assert pos.greeks.vega == pytest.approx(expected.vega * qty)
+
+
+def test_greeks_do_not_fetch_the_users_whole_order_history(db, user, registry):
+    """Regression test for a real latency bug measured 2026-09-07: GET
+    /options/greeks took ~2.6s on EVERY call (not just a cold one -- it
+    had no cache at all). It pulled every paper order the user had ever
+    placed -- 108,328 rows, 0.78s just to ORM-materialize -- purely to
+    filter down to the option rows and re-walk the whole history through
+    compute_account.
+
+    Both halves are now scoped: the option metadata comes from a filtered
+    query, and the position snapshot from the shared incremental cache.
+    The point of this test is that the numbers are unchanged -- so it
+    asserts real greeks on a real position, while pinning that no query
+    issued here returns a non-option order."""
+    expiry = chain.list_expiries()[0].date
+    strike = _atm_strike(registry, "NIFTY50")
+    # A real equity order in the same account, which greeks must not read.
+    db.add(Order(
+        user_id=user.id, mode=Mode.paper, symbol="ICICIBANK", side=Side.buy,
+        order_type=OrderType.market, qty=5, px=None, status=OrderStatus.filled,
+        filled_qty=5, avg_fill_px=1250.0,
+    ))
+    db.commit()
+    submit_option_paper_order(
+        db, registry, user_id=user.id, strategy_key=None, underlying="NIFTY50",
+        option_type="CE", strike=strike, expiry_iso=expiry, side="buy", qty=2,
+    )
+
+    fetched: list[str] = []
+    real_all = Query.all
+
+    def _recording_all(self):
+        rows = real_all(self)
+        fetched.append(str(self))
+        return rows
+
+    # The FIRST call is allowed one full walk -- that's the shared account
+    # cache being built, and it happens once per process, not per request.
+    # What the old code did, and what actually cost 2.6s on every single
+    # poll, was paying that walk again on every subsequent call.
+    get_portfolio_greeks(db, user, registry)
+    with mock.patch.object(Query, "all", _recording_all):
+        result = get_portfolio_greeks(db, user, registry)
+
+    assert len(result.positions) == 1
+    assert result.positions[0].qty == 2
+    assert result.aggregate.delta != 0.0
+
+    assert fetched, "the query recorder should have seen real queries"
+    # Only the WHERE clause is examined: a full-entity SELECT names EVERY
+    # column (instrument_type included) in its select list, so matching on
+    # the whole statement would pass even for the unscoped walk this is
+    # meant to catch -- confirmed by reintroducing the bug and watching an
+    # earlier version of this assertion stay green.
+    unscoped = []
+    for statement in fetched:
+        if "FROM orders" not in statement:
+            continue
+        where = " ".join(statement.split("WHERE", 1)[-1].split())
+        # Either scoped to option rows only, or an incremental resume of
+        # the shared account cache (which reads past a watermark id).
+        if "instrument_type" not in where and "orders.id >" not in where:
+            unscoped.append(where)
+    assert not unscoped, f"greeks should not re-read the full order history: {unscoped}"
 
 
 def test_closed_position_does_not_appear_in_greeks(db, user, registry):
